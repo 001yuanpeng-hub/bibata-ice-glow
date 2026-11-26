@@ -47,6 +47,27 @@ function Get-FileSha256([string]$path) {
     return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
 
+function Write-FileFreshInode([string]$srcFile, [string]$dstFile) {
+    $dir = Split-Path -Parent $dstFile
+    if (-not [string]::IsNullOrWhiteSpace($dir) -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $tmpFile = "$dstFile.swap." + [Guid]::NewGuid().ToString("N").Substring(0, 8) + ".tmp"
+    try {
+        [System.IO.File]::Copy($srcFile, $tmpFile, $true)
+        if (Test-Path -LiteralPath $dstFile -PathType Leaf) {
+            Remove-Item -LiteralPath $dstFile -Force -ErrorAction Stop
+        }
+        [System.IO.File]::Move($tmpFile, $dstFile)
+    }
+    catch {
+        if (Test-Path -LiteralPath $tmpFile -PathType Leaf) {
+            Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
 function Restore-FileBackup([string]$backupPath, [string]$targetPath) {
     if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
         return $false
@@ -249,6 +270,51 @@ function Restore-CursorState([string]$cursorsPath, $prevState) {
     }
 }
 
+function Resolve-InheritedCursorState($currentState, [string]$currentInstallDir) {
+    $state = $currentState
+    if (-not $state -or -not $state.existed) { return $state }
+    $visited = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $curNorm = Normalize-BibataPath $currentInstallDir
+    if (-not [string]::IsNullOrEmpty($curNorm)) {
+        $visited.Add($curNorm) | Out-Null
+    }
+
+    for ($hop = 0; $hop -lt 5; $hop++) {
+        $arrowVal = $null
+        if ($state.roles) {
+            if ($state.roles -is [System.Collections.IDictionary]) {
+                if ($state.roles.Contains("Arrow")) { $arrowVal = $state.roles["Arrow"] }
+            }
+            elseif ($state.roles.PSObject.Properties["Arrow"]) {
+                $arrowVal = $state.roles.Arrow
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$arrowVal)) { break }
+        $arrowStr = [string]$arrowVal
+        if ($arrowStr -notmatch '^(?i)(.+)\\Bibata-(?:Modern|Original)-Ice\\Bibata-(?:Modern|Original)-Ice-(?:Regular|Large|Extra-Large)-Windows\\[^\\]+$') {
+            break
+        }
+        $otherInstallDir = $Matches[1]
+        $otherNorm = Normalize-BibataPath $otherInstallDir
+        if ([string]::IsNullOrEmpty($otherNorm) -or $visited.Contains($otherNorm)) { break }
+        $visited.Add($otherNorm) | Out-Null
+
+        $otherManifestPath = Join-Path $otherInstallDir "bibata-ice-glow-manifest.json"
+        if (-not (Test-Path -LiteralPath $otherManifestPath -PathType Leaf)) { break }
+        try {
+            $otherManifest = Get-Content -LiteralPath $otherManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($otherManifest -and $otherManifest.managedCursor -and $otherManifest.previousCursorState -and $otherManifest.previousCursorState.existed) {
+                $state = $otherManifest.previousCursorState
+                continue
+            }
+        }
+        catch {
+        }
+        break
+    }
+    return $state
+}
+
 function Start-BibataInstance([string]$exePath, [string]$workDir, [string]$extraArgs, [switch]$NoTaskScheduler) {
     $argTokens = New-Object System.Collections.Generic.List[string]
     if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
@@ -326,6 +392,7 @@ $managedThemeDirs = New-Object System.Collections.Generic.List[string]
 $managedCursorDirs = New-Object System.Collections.Generic.List[string]
 $managedCursorFiles = New-Object System.Collections.Generic.List[string]
 $managedSchemes = New-Object System.Collections.Generic.List[string]
+$managedSchemeRecords = New-Object 'System.Collections.Specialized.OrderedDictionary' ([StringComparer]::OrdinalIgnoreCase)
 $previousCursorState = $null
 $prevTrailExePath = Join-Path (Join-Path $InstallDir "Bibata-Ice-Trail") "BibataIceTrail.exe"
 $autoStartManaged = $false
@@ -348,6 +415,19 @@ if ($prevManifest) {
         foreach ($s in $prevManifest.managedSchemes) {
             if (-not [string]::IsNullOrWhiteSpace($s) -and -not ($managedSchemes -contains $s)) {
                 $managedSchemes.Add([string]$s)
+            }
+        }
+    }
+    if ($prevManifest.managedSchemeRecords) {
+        foreach ($prop in $prevManifest.managedSchemeRecords.PSObject.Properties) {
+            $recObj = $prop.Value
+            if ($recObj) {
+                $managedSchemeRecords[$prop.Name] = [ordered]@{
+                    existedBefore = [bool]$recObj.existedBefore
+                    previousValue = $recObj.previousValue
+                    previousKind  = if ([string]::IsNullOrWhiteSpace([string]$recObj.previousKind)) { "String" } else { [string]$recObj.previousKind }
+                    writtenValue  = [string]$recObj.writtenValue
+                }
             }
         }
     }
@@ -521,13 +601,17 @@ try {
     $schemeSnapBefore = $null
     $createdCursorDirsThisRun = New-Object System.Collections.Generic.List[string]
     $createdCursorFilesThisRun = New-Object System.Collections.Generic.List[string]
+    $createdCursorNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $cursorBackupDir = ""
+    $overwrittenCursorBackups = New-Object System.Collections.Generic.List[object]
+    $backedUpCursorNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $cursorRegistryApplied = $false
 
     if (-not $SkipCursor) {
         $themeExistedBefore = Test-Path -LiteralPath $themeRoot
         $cursorsStateBeforeThisRun = Snapshot-CursorState $cursorsKey
         if ($null -eq $previousCursorState) {
-            $previousCursorState = $cursorsStateBeforeThisRun
+            $previousCursorState = Resolve-InheritedCursorState $cursorsStateBeforeThisRun $InstallDir
         }
         $schemeSnapBefore = Snapshot-RegValue $schemesKey $schemeName
     }
@@ -603,9 +687,28 @@ try {
                         continue
                     }
                     $existed = Test-Path -LiteralPath $dstFile
-                    Copy-Item -LiteralPath $sf.FullName -Destination $dstFile -Force
-                    if (-not $existed) {
+                    if ($existed) {
+                        if (-not $createdCursorNormSet.Contains($dstNorm) -and -not $backedUpCursorNormSet.Contains($dstNorm)) {
+                            if ([string]::IsNullOrWhiteSpace($cursorBackupDir)) {
+                                $cursorBackupDir = Join-Path $env:TEMP ("bibata_cursor_bak_" + [Guid]::NewGuid().ToString("N"))
+                                New-Item -ItemType Directory -Path $cursorBackupDir -Force | Out-Null
+                            }
+                            $bakFile = Join-Path $cursorBackupDir ("bak_" + $overwrittenCursorBackups.Count + ".bin")
+                            $origHash = Get-FileSha256 $dstFile
+                            [System.IO.File]::Copy($dstFile, $bakFile, $true)
+                            $overwrittenCursorBackups.Add([pscustomobject]@{
+                                Target = $dstFile
+                                Backup = $bakFile
+                                Hash   = $origHash
+                            })
+                            $backedUpCursorNormSet.Add($dstNorm) | Out-Null
+                        }
+                        Write-FileFreshInode $sf.FullName $dstFile
+                    }
+                    else {
+                        Copy-Item -LiteralPath $sf.FullName -Destination $dstFile -Force
                         Add-UniquePath $createdCursorFilesThisRun $dstFile
+                        $createdCursorNormSet.Add($dstNorm) | Out-Null
                     }
                     Add-UniquePath $managedCursorFiles $dstFile
                 }
@@ -623,6 +726,20 @@ try {
                         if ($hashTable.ContainsKey($h)) {
                             $target = $hashTable[$h]
                             if ((Normalize-BibataPath $target) -eq $normMf) { continue }
+                            if (-not $createdCursorNormSet.Contains($normMf) -and -not $backedUpCursorNormSet.Contains($normMf)) {
+                                if ([string]::IsNullOrWhiteSpace($cursorBackupDir)) {
+                                    $cursorBackupDir = Join-Path $env:TEMP ("bibata_cursor_bak_" + [Guid]::NewGuid().ToString("N"))
+                                    New-Item -ItemType Directory -Path $cursorBackupDir -Force | Out-Null
+                                }
+                                $bakFile = Join-Path $cursorBackupDir ("bak_" + $overwrittenCursorBackups.Count + ".bin")
+                                [System.IO.File]::Copy($mf, $bakFile, $true)
+                                $overwrittenCursorBackups.Add([pscustomobject]@{
+                                    Target = $mf
+                                    Backup = $bakFile
+                                    Hash   = $h
+                                })
+                                $backedUpCursorNormSet.Add($normMf) | Out-Null
+                            }
                             $backup = "$mf.dedup.tmp"
                             try {
                                 Move-Item -LiteralPath $mf -Destination $backup -Force
@@ -653,9 +770,10 @@ try {
             foreach ($role in $roleMap.Keys) {
                 $schemePaths.Add((Join-Path $cursorDir $roleMap[$role]))
             }
+            $schemeValueStr = $schemePaths -join ","
 
             $cursorRegistryApplied = $true
-            Set-ItemProperty -Path $schemesKey -Name $schemeName -Value ($schemePaths -join ",") -Type String
+            Set-ItemProperty -Path $schemesKey -Name $schemeName -Value $schemeValueStr -Type String
             Set-ItemProperty -Path $cursorsKey -Name "(Default)" -Value $schemeName
             Set-ItemProperty -Path $cursorsKey -Name "Scheme Source" -Value 1 -Type DWord
             foreach ($role in $roleMap.Keys) {
@@ -672,6 +790,17 @@ try {
             }
             if (-not ($managedSchemes -contains $schemeName)) {
                 $managedSchemes.Add($schemeName)
+            }
+            if (-not $managedSchemeRecords.Contains($schemeName)) {
+                $managedSchemeRecords[$schemeName] = [ordered]@{
+                    existedBefore = [bool]$schemeSnapBefore.valExisted
+                    previousValue = $schemeSnapBefore.value
+                    previousKind  = [string]$schemeSnapBefore.kind
+                    writtenValue  = $schemeValueStr
+                }
+            }
+            else {
+                $managedSchemeRecords[$schemeName].writtenValue = $schemeValueStr
             }
 
             Write-Host "Applied cursor scheme: $schemeName" -ForegroundColor Green
@@ -751,18 +880,19 @@ try {
         }
 
         $manifestObj = [ordered]@{
-            schemaVersion       = 2
-            installDir          = $InstallDir
-            managedTrail        = $managedTrail
-            trailExePath        = $prevTrailExePath
-            autoStartManaged    = $autoStartManaged
-            managedCursor       = $managedCursor
-            managedThemeDirs    = @($managedThemeDirs)
-            managedCursorDirs   = @($managedCursorDirs)
-            managedCursorFiles  = @($managedCursorFiles)
-            managedSchemes      = @($managedSchemes)
-            previousCursorState = $previousCursorState
-            updatedAt           = (Get-Date).ToString("o")
+            schemaVersion        = 2
+            installDir           = $InstallDir
+            managedTrail         = $managedTrail
+            trailExePath         = $prevTrailExePath
+            autoStartManaged     = $autoStartManaged
+            managedCursor        = $managedCursor
+            managedThemeDirs     = @($managedThemeDirs)
+            managedCursorDirs    = @($managedCursorDirs)
+            managedCursorFiles   = @($managedCursorFiles)
+            managedSchemes       = @($managedSchemes)
+            managedSchemeRecords = $managedSchemeRecords
+            previousCursorState  = $previousCursorState
+            updatedAt            = (Get-Date).ToString("o")
         }
         $manifestJson = $manifestObj | ConvertTo-Json -Depth 6
         Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
@@ -771,6 +901,9 @@ try {
             if (Test-Path -LiteralPath $exeBak) { Remove-Item -LiteralPath $exeBak -Force -ErrorAction SilentlyContinue }
             if (Test-Path -LiteralPath $csBak) { Remove-Item -LiteralPath $csBak -Force -ErrorAction SilentlyContinue }
             if (Test-Path -LiteralPath $cfgBak) { Remove-Item -LiteralPath $cfgBak -Force -ErrorAction SilentlyContinue }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($cursorBackupDir) -and (Test-Path -LiteralPath $cursorBackupDir)) {
+            Remove-Item -LiteralPath $cursorBackupDir -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
     catch {
@@ -846,6 +979,23 @@ try {
                 }
             }
 
+            foreach ($bk in $overwrittenCursorBackups) {
+                try {
+                    if (Test-Path -LiteralPath $bk.Backup -PathType Leaf) {
+                        Write-FileFreshInode $bk.Backup $bk.Target
+                        if ((Get-FileSha256 $bk.Target) -eq $bk.Hash) {
+                            Remove-Item -LiteralPath $bk.Backup -Force -ErrorAction SilentlyContinue
+                        }
+                        else {
+                            Write-Warning "Cursor file backup hash mismatch for $($bk.Target); keeping backup at $($bk.Backup)"
+                        }
+                    }
+                }
+                catch {
+                    Write-Warning "Could not restore cursor file $($bk.Target): $($_.Exception.Message); keeping backup at $($bk.Backup)"
+                }
+            }
+
             $dirsDesc = @($createdCursorDirsThisRun | Sort-Object { $_.Length } -Descending)
             foreach ($cd in $dirsDesc) {
                 if (Test-Path -LiteralPath $cd -PathType Container) {
@@ -853,6 +1003,13 @@ try {
                     if ($remDir.Count -eq 0) {
                         Remove-Item -LiteralPath $cd -Force -ErrorAction SilentlyContinue
                     }
+                }
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($cursorBackupDir) -and (Test-Path -LiteralPath $cursorBackupDir)) {
+                $remBak = @(Get-ChildItem -LiteralPath $cursorBackupDir -Force -ErrorAction SilentlyContinue)
+                if ($remBak.Count -eq 0) {
+                    Remove-Item -LiteralPath $cursorBackupDir -Force -ErrorAction SilentlyContinue
                 }
             }
         }

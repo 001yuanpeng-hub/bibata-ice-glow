@@ -57,7 +57,7 @@ function Assert-True([bool]$cond, [string]$msg) {
     if (-not $cond) { throw "ASSERTION FAILED: $msg" }
 }
 
-function New-CursorFixtureZip([string]$zipOutPath) {
+function New-CursorFixtureZip([string]$zipOutPath, [string]$Tag = "v1", [int]$AniSeed = 0, [switch]$AllSizesDistinctAni, [string[]]$Sizes = @("Regular","Large","Extra-Large")) {
     $stage = Join-Path $testRoot "zip_fixture_stage"
     if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
     $roles = @(
@@ -66,17 +66,24 @@ function New-CursorFixtureZip([string]$zipOutPath) {
         "Dgn2.cur","Move.cur","Alternate.cur","Link.cur","Pin.cur","Person.cur",
         "install.inf","uninstall.bat","Zoom-in.cur"
     )
-    $sharedAni = [byte[]](1..70000 | ForEach-Object { [byte]($_ % 251) })
-    foreach ($sz in @("Regular","Large","Extra-Large")) {
+    $sharedAni = [byte[]](1..70000 | ForEach-Object { [byte](($_ + $AniSeed) % 251) })
+    foreach ($sz in $Sizes) {
         $d = Join-Path $stage ("Bibata-Modern-Ice-" + $sz + "-Windows")
         New-Item -ItemType Directory -Path $d -Force | Out-Null
         foreach ($r in $roles) {
             $fp = Join-Path $d $r
-            if (($r -eq "Busy.ani" -or $r -eq "Work.ani") -and ($sz -ne "Extra-Large")) {
-                [System.IO.File]::WriteAllBytes($fp, $sharedAni)
+            if (($r -eq "Busy.ani" -or $r -eq "Work.ani") -and ($AllSizesDistinctAni -or $sz -ne "Extra-Large")) {
+                if ($AllSizesDistinctAni) {
+                    $szOffset = switch ($sz) { "Regular" { 1 } "Large" { 7 } default { 19 } }
+                    $distinctAni = [byte[]](1..70000 | ForEach-Object { [byte](($_ + $AniSeed + $szOffset) % 251) })
+                    [System.IO.File]::WriteAllBytes($fp, $distinctAni)
+                }
+                else {
+                    [System.IO.File]::WriteAllBytes($fp, $sharedAni)
+                }
             }
             else {
-                [System.IO.File]::WriteAllText($fp, "$sz-$r")
+                [System.IO.File]::WriteAllText($fp, "$Tag-$sz-$r")
             }
         }
     }
@@ -130,9 +137,11 @@ try {
     $c1 = Join-Path $r1 "Control Panel\Cursors"
     $s1 = Join-Path $c1 "Schemes"
     New-Item -Path $s1 -Force | Out-Null
+    $case1OrigArrow = Join-Path $testRoot "case1_orig.cur"
+    Set-Content -Path $case1OrigArrow -Value "case1-orig-cur" -Encoding UTF8
     Set-ItemProperty -Path $c1 -Name "(Default)" -Value "OrigUserScheme" -Type String
     Set-ItemProperty -Path $c1 -Name "Scheme Source" -Value 1 -Type DWord
-    Set-ItemProperty -Path $c1 -Name "Arrow" -Value "C:\PreExisting\orig.cur" -Type String
+    Set-ItemProperty -Path $c1 -Name "Arrow" -Value $case1OrigArrow -Type String
 
     & $installPs1 -InstallDir $d1 -Size Regular -SingleSize -NoLaunch -RegistryRoot $r1 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
 
@@ -374,6 +383,223 @@ class FailLaunch {
     Assert-True ($pids8After.Count -eq 1) "Case 6c: Old version not restarted after lock rollback"
     foreach ($procId in $pids8After) { Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue }
     Write-Host "PASS Case 6: SkipCursor, user theme switch, and locked EXE rollback all pass" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 7 (Issue 1): Real v1 manifest (effba4d) uninstall must preserve personal-notes.txt
+    # =========================================================================
+    $d9 = Join-Path $testRoot "case7_v1_manifest"
+    $r9 = Join-Path $regRoot "case9"
+    $theme9 = Join-Path $d9 "Bibata-Modern-Ice"
+    New-Item -ItemType Directory -Path $theme9 -Force | Out-Null
+    $personalNotes = Join-Path $theme9 "personal-notes.txt"
+    Set-Content -Path $personalNotes -Value "keep-these-v1-notes" -Encoding UTF8
+    $c9 = Join-Path $r9 "Control Panel\Cursors"
+    New-Item -Path (Join-Path $c9 "Schemes") -Force | Out-Null
+    Set-ItemProperty -Path $c9 -Name "(Default)" -Value "OrigV1" -Type String
+    Set-ItemProperty -Path $c9 -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+
+    $effba4dInstall = Join-Path $testRoot "effba4d_install.ps1"
+    $gitExe = "D:\Project\Tools\Git\cmd\git.exe"
+    $generatedGenuineV1 = $false
+    if (Test-Path $gitExe) {
+        $v1ScriptBytes = & $gitExe -C $repoRoot show "effba4d:install.ps1" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $v1ScriptBytes) {
+            [System.IO.File]::WriteAllText($effba4dInstall, ($v1ScriptBytes -join "`r`n"), [System.Text.Encoding]::UTF8)
+            & $effba4dInstall -InstallDir $d9 -Size Regular -NoLaunch -RegistryRoot $r9 -SkipCursorRefresh -SkipTaskScheduler -TestSourceOverride (Join-Path $repoRoot "src\BibataIceTrail.cs") -TestCursorZipPath $fixtureZip | Out-Null
+            $generatedGenuineV1 = $true
+        }
+    }
+    if (-not $generatedGenuineV1) {
+        & $installPs1 -InstallDir $d9 -Size Regular -NoLaunch -RegistryRoot $r9 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+        $v1Fallback = [ordered]@{
+            schemaVersion       = 1
+            installDir          = $d9
+            managedTrail        = $true
+            trailExePath        = (Join-Path $d9 "Bibata-Ice-Trail\BibataIceTrail.exe")
+            autoStartManaged    = $true
+            managedCursor       = $true
+            managedThemeDirs    = @($theme9)
+            managedSchemes      = @("Bibata-Modern-Ice (Regular)")
+            previousCursorState = [ordered]@{ existed = $true; defaultScheme = "OrigV1"; schemeSource = 2; roles = [ordered]@{ Arrow = "%SystemRoot%\cursors\aero_arrow.cur" } }
+            updatedAt           = (Get-Date).ToString("o")
+        }
+        Set-Content -Path (Join-Path $d9 "bibata-ice-glow-manifest.json") -Value ($v1Fallback | ConvertTo-Json -Depth 6) -Encoding UTF8
+    }
+
+    $m9 = Get-Content -LiteralPath (Join-Path $d9 "bibata-ice-glow-manifest.json") -Raw | ConvertFrom-Json
+    Assert-True ($m9.schemaVersion -eq 1) "Case 7: Expected v1 manifest from effba4d"
+    Assert-True ($null -eq $m9.PSObject.Properties["managedCursorFiles"]) "Case 7: v1 manifest must not have managedCursorFiles"
+
+    & $uninstallPs1 -InstallDir $d9 -RegistryRoot $r9 -SkipCursorRefresh | Out-Null
+    Assert-True (Test-Path -LiteralPath $personalNotes) "Case 7: personal-notes.txt was deleted by v1 uninstall!"
+    Assert-True ((Get-Content -LiteralPath $personalNotes -Raw).Trim() -eq "keep-these-v1-notes") "Case 7: personal-notes.txt content altered!"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $theme9 "Bibata-Modern-Ice-Regular-Windows\Pointer.cur"))) "Case 7: Known Bibata Regular cursor not cleaned in v1 uninstall"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $theme9 "Bibata-Modern-Ice-Regular-Windows"))) "Case 7: Empty Bibata size folder not removed in v1 uninstall"
+    Assert-True ((Get-Item $c9).GetValue("", $null) -eq "OrigV1") "Case 7: Pre-install cursor scheme not restored"
+    Write-Host "PASS Case 7: Real effba4d v1 manifest uninstall cleans known cursors while keeping personal-notes.txt" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 8 (Issue 2): Migration A -> B -> uninstall A -> uninstall B restores orig custom theme,
+    #                   plus fallback to Windows default if original custom files disappeared
+    # =========================================================================
+    $d10orig = Join-Path $testRoot "case8_orig_custom"
+    New-Item -ItemType Directory -Path $d10orig -Force | Out-Null
+    $origArrow = Join-Path $d10orig "orig_arrow.cur"
+    $origHand = Join-Path $d10orig "orig_hand.cur"
+    Set-Content -Path $origArrow -Value "orig-arrow" -Encoding UTF8
+    Set-Content -Path $origHand -Value "orig-hand" -Encoding UTF8
+
+    $d10A = Join-Path $testRoot "case8_dirA"
+    $d10B = Join-Path $testRoot "case8_dirB"
+    $r10 = Join-Path $regRoot "case10"
+    $c10 = Join-Path $r10 "Control Panel\Cursors"
+    New-Item -Path (Join-Path $c10 "Schemes") -Force | Out-Null
+    Set-ItemProperty -Path $c10 -Name "(Default)" -Value "OrigCustomTheme8" -Type String
+    Set-ItemProperty -Path $c10 -Name "Scheme Source" -Value 1 -Type DWord
+    Set-ItemProperty -Path $c10 -Name "Arrow" -Value $origArrow -Type String
+    Set-ItemProperty -Path $c10 -Name "Hand" -Value $origHand -Type String
+    Set-ItemProperty -Path $c10 -Name "Wait" -Value "%SystemRoot%\cursors\aero_busy.ani" -Type ExpandString
+    Set-ItemProperty -Path $c10 -Name "Crosshair" -Value "" -Type String
+    Set-ItemProperty -Path $c10 -Name "IBeam" -Value "" -Type String
+
+    & $installPs1 -InstallDir $d10A -NoLaunch -RegistryRoot $r10 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    & $installPs1 -InstallDir $d10B -NoLaunch -RegistryRoot $r10 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+
+    # Uninstall A first: B must remain active and usable
+    & $uninstallPs1 -InstallDir $d10A -RegistryRoot $r10 -SkipCursorRefresh | Out-Null
+    $arrowAfterUninstA = (Get-Item $c10).GetValue("Arrow", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    Assert-True ($arrowAfterUninstA -like "*case8_dirB*Pointer.cur") "Case 8a: Uninstalling A disturbed active B cursor ($arrowAfterUninstA)"
+    Assert-True (Test-Path -LiteralPath $arrowAfterUninstA -PathType Leaf) "Case 8a: Active B Pointer.cur missing after uninstalling A"
+
+    # Now uninstall B: must restore OrigCustomTheme8 (inherited across A->B) and all role files must exist!
+    & $uninstallPs1 -InstallDir $d10B -RegistryRoot $r10 -SkipCursorRefresh | Out-Null
+    $curItem10 = Get-Item $c10
+    Assert-True ($curItem10.GetValue("", $null) -eq "OrigCustomTheme8") "Case 8a: Did not restore original custom scheme after A->B migration"
+    foreach ($roleCheck in @("Arrow", "Hand", "Wait")) {
+        $rv = [string]$curItem10.GetValue($roleCheck, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        Assert-True (-not [string]::IsNullOrWhiteSpace($rv)) "Case 8a: Restored $roleCheck is empty"
+        $exp = [Environment]::ExpandEnvironmentVariables($rv)
+        Assert-True (Test-Path -LiteralPath $exp -PathType Leaf) "Case 8a: Restored $roleCheck target does not exist on disk ($rv -> $exp)"
+    }
+    Assert-True ($curItem10.GetValue("Arrow", $null) -eq $origArrow) "Case 8a: Restored Arrow mismatch"
+    Assert-True ($curItem10.GetValue("Crosshair", $null) -eq "") "Case 8a: Crosshair empty string not preserved"
+
+    # Case 8b: Fallback to Windows defaults when inherited original files are deleted before uninstall B
+    & $installPs1 -InstallDir $d10A -NoLaunch -RegistryRoot $r10 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    & $installPs1 -InstallDir $d10B -NoLaunch -RegistryRoot $r10 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    & $uninstallPs1 -InstallDir $d10A -RegistryRoot $r10 -SkipCursorRefresh | Out-Null
+    Remove-Item -LiteralPath $origArrow -Force
+    & $uninstallPs1 -InstallDir $d10B -RegistryRoot $r10 -SkipCursorRefresh | Out-Null
+    $arrowFallback = [string](Get-Item $c10).GetValue("Arrow", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    Assert-True ($arrowFallback -eq "%SystemRoot%\cursors\aero_arrow.cur") "Case 8b: Should fall back to Windows default aero_arrow.cur, got '$arrowFallback'"
+    Assert-True (Test-Path -LiteralPath ([Environment]::ExpandEnvironmentVariables($arrowFallback)) -PathType Leaf) "Case 8b: Fallback Windows default cursor file missing"
+    Write-Host "PASS Case 8: Migration A->B->uninstall A->uninstall B restores valid custom theme or valid Windows defaults" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 9 (Issue 3): Overwritten cursor files + hardlink sibling safety rollback when manifest locked
+    # =========================================================================
+    $oldZip9 = Join-Path $testRoot "cursor_old.zip"
+    $newZip9 = Join-Path $testRoot "cursor_new.zip"
+    New-CursorFixtureZip -zipOutPath $oldZip9 -Tag "oldpkg" -AniSeed 3
+    New-CursorFixtureZip -zipOutPath $newZip9 -Tag "newpkg" -AniSeed 19 -AllSizesDistinctAni
+
+    # Case 9a: Old Regular (-SingleSize) -> upgrade Large with newZip while manifest locked
+    $d11 = Join-Path $testRoot "case9a_cursor_rollback"
+    $r11 = Join-Path $regRoot "case11a"
+    & $installPs1 -InstallDir $d11 -Size Regular -SingleSize -NoLaunch -RegistryRoot $r11 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $oldZip9 | Out-Null
+    $regPtr11 = Join-Path $d11 "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows\Pointer.cur"
+    $regBusy11 = Join-Path $d11 "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows\Busy.ani"
+    $regPtrHashBefore = Get-FileSha256 $regPtr11
+    $regBusyHashBefore = Get-FileSha256 $regBusy11
+    $manifest11 = Join-Path $d11 "bibata-ice-glow-manifest.json"
+    $lockScript11 = "`$fs = [System.IO.File]::Open('$manifest11', 'Open', 'ReadWrite', 'None'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
+    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript11 -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 350
+
+    $threw11 = $false
+    try {
+        & $installPs1 -InstallDir $d11 -Size Large -NoLaunch -RegistryRoot $r11 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $newZip9 | Out-Null
+    }
+    catch {
+        $threw11 = $true
+    }
+    Assert-True $threw11 "Case 9a: Locked manifest should fail upgrade"
+    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
+    $c11 = Join-Path $r11 "Control Panel\Cursors"
+    Assert-True ((Get-Item $c11).GetValue("", $null) -eq "Bibata-Modern-Ice (Regular)") "Case 9a: Active scheme did not roll back to Regular"
+    Assert-True ((Get-FileSha256 $regPtr11) -eq $regPtrHashBefore) "Case 9a: Regular Pointer.cur was NOT rolled back to old content!"
+    Assert-True ((Get-FileSha256 $regBusy11) -eq $regBusyHashBefore) "Case 9a: Regular Busy.ani was NOT rolled back to old content!"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d11 "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows"))) "Case 9a: Newly added Large directory was NOT cleaned up on rollback!"
+
+    # Case 9b: Hardlink sibling safety across Regular & Large when Extra-Large triggers newZip overwrite + manifest lock
+    $oldZipHL = Join-Path $testRoot "cursor_old_hl.zip"
+    New-CursorFixtureZip -zipOutPath $oldZipHL -Tag "oldhl" -AniSeed 5 -Sizes @("Regular","Large")
+    $d11b = Join-Path $testRoot "case9b_hardlink_rollback"
+    $r11b = Join-Path $regRoot "case11b"
+    & $installPs1 -InstallDir $d11b -Size Regular -NoLaunch -RegistryRoot $r11b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $oldZipHL | Out-Null
+    $hlRegBusy = Join-Path $d11b "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows\Busy.ani"
+    $hlLargeBusy = Join-Path $d11b "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows\Busy.ani"
+    $hlRegHashBefore = Get-FileSha256 $hlRegBusy
+    $hlLargeHashBefore = Get-FileSha256 $hlLargeBusy
+    Assert-True ($hlRegHashBefore -eq $hlLargeHashBefore) "Case 9b: Expected shared initial Busy.ani bytes"
+
+    $manifest11b = Join-Path $d11b "bibata-ice-glow-manifest.json"
+    $lockScript11b = "`$fs = [System.IO.File]::Open('$manifest11b', 'Open', 'ReadWrite', 'None'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
+    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript11b -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 350
+
+    $threw11b = $false
+    try {
+        & $installPs1 -InstallDir $d11b -Size Extra-Large -NoLaunch -RegistryRoot $r11b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $newZip9 | Out-Null
+    }
+    catch {
+        $threw11b = $true
+    }
+    Assert-True $threw11b "Case 9b: Locked manifest should fail upgrade"
+    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
+    Assert-True ((Get-FileSha256 $hlRegBusy) -eq $hlRegHashBefore) "Case 9b: Regular Busy.ani corrupted after hardlink rollback"
+    Assert-True ((Get-FileSha256 $hlLargeBusy) -eq $hlLargeHashBefore) "Case 9b: Large Busy.ani corrupted after hardlink rollback"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d11b "Bibata-Modern-Ice\Bibata-Modern-Ice-Extra-Large-Windows"))) "Case 9b: Newly added Extra-Large folder not cleaned"
+    Write-Host "PASS Case 9: Overwritten cursor files & NTFS hardlink siblings roll back with identical SHA-256" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 10 (Issue 4): Pre-existing same-name scheme in Schemes & post-install manual edits
+    # =========================================================================
+    # 10a: Pre-existing ExpandString scheme -> install -> upgrade -> uninstall restores exact original value & kind
+    $d12a = Join-Path $testRoot "case10a_scheme_restore"
+    $r12a = Join-Path $regRoot "case12a"
+    $c12a = Join-Path $r12a "Control Panel\Cursors"
+    $s12a = Join-Path $c12a "Schemes"
+    New-Item -Path $s12a -Force | Out-Null
+    $origSchemeVal = "%SystemRoot%\cursors\aero_arrow.cur,custom-user-preexisting"
+    Set-ItemProperty -Path $s12a -Name "Bibata-Modern-Ice (Regular)" -Value $origSchemeVal -Type ExpandString
+    Set-ItemProperty -Path $c12a -Name "(Default)" -Value "Bibata-Modern-Ice (Regular)" -Type String
+    Set-ItemProperty -Path $c12a -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+
+    & $installPs1 -InstallDir $d12a -Size Regular -NoLaunch -RegistryRoot $r12a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    # Upgrade once more to verify original record is NOT overwritten by repeat install
+    & $installPs1 -InstallDir $d12a -Size Regular -NoLaunch -RegistryRoot $r12a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    & $uninstallPs1 -InstallDir $d12a -RegistryRoot $r12a -SkipCursorRefresh | Out-Null
+
+    $s12aItem = Get-Item -Path $s12a
+    $restoredScheme = $s12aItem.GetValue("Bibata-Modern-Ice (Regular)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $restoredKind = $s12aItem.GetValueKind("Bibata-Modern-Ice (Regular)").ToString()
+    Assert-True ($restoredScheme -eq $origSchemeVal) "Case 10a: Pre-existing same-name scheme was not restored (got '$restoredScheme')"
+    Assert-True ($restoredKind -eq "ExpandString") "Case 10a: Restored scheme registry kind changed ($restoredKind)"
+
+    # 10b: Fresh install -> user manually edits "Bibata-Modern-Ice (Regular)" -> uninstall keeps user edit
+    $d12b = Join-Path $testRoot "case10b_scheme_user_edit"
+    $r12b = Join-Path $regRoot "case12b"
+    $c12b = Join-Path $r12b "Control Panel\Cursors"
+    $s12b = Join-Path $c12b "Schemes"
+    New-Item -Path $s12b -Force | Out-Null
+    & $installPs1 -InstallDir $d12b -Size Regular -NoLaunch -RegistryRoot $r12b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $userEditedScheme = "C:\MyEditedCursors\arrow.cur,custom-edited"
+    Set-ItemProperty -Path $s12b -Name "Bibata-Modern-Ice (Regular)" -Value $userEditedScheme -Type String
+    & $uninstallPs1 -InstallDir $d12b -RegistryRoot $r12b -SkipCursorRefresh | Out-Null
+    $actualAfterEdit = (Get-Item -Path $s12b).GetValue("Bibata-Modern-Ice (Regular)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    Assert-True ($actualAfterEdit -eq $userEditedScheme) "Case 10b: Manually edited same-name scheme was deleted/overwritten (got '$actualAfterEdit')"
+    Write-Host "PASS Case 10: Pre-existing same-name scheme restored cleanly & manual post-install edits preserved" -ForegroundColor Green
 
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched

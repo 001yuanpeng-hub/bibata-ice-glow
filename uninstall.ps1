@@ -127,6 +127,33 @@ function Restore-CursorState($cursorsPath, $prevState) {
     }
 }
 
+function Test-CursorStateValid($prevState) {
+    if (-not $prevState -or -not $prevState.existed -or -not $prevState.roles) {
+        return $false
+    }
+    $vals = New-Object System.Collections.Generic.List[object]
+    if ($prevState.roles -is [System.Collections.IDictionary]) {
+        foreach ($roleName in $prevState.roles.Keys) {
+            $vals.Add($prevState.roles[$roleName])
+        }
+    }
+    else {
+        foreach ($prop in $prevState.roles.PSObject.Properties) {
+            $vals.Add($prop.Value)
+        }
+    }
+    foreach ($v in $vals) {
+        if ($null -eq $v) { continue }
+        $s = [string]$v
+        if ([string]::IsNullOrWhiteSpace($s)) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables($s)
+        if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Restore-WindowsDefaultCursors([string]$cursorsPath) {
     if (-not (Test-Path $cursorsPath)) { return }
     Set-ItemProperty -Path $cursorsPath -Name "(Default)" -Value "" -Type String
@@ -262,13 +289,18 @@ if ($manifest) {
             (($managedSchemes -contains $currentDefault) -and (Test-PathUnderAny $currentArrow $possibleBibataDirs))
 
         if ($stillUsingOurs) {
-            if ($manifest.previousCursorState -and $manifest.previousCursorState.existed) {
+            if (Test-CursorStateValid $manifest.previousCursorState) {
                 Restore-CursorState $cursorsKey $manifest.previousCursorState
                 Write-Host "Restored pre-install cursor configuration." -ForegroundColor Green
             }
             else {
+                if ($manifest.previousCursorState -and $manifest.previousCursorState.existed) {
+                    Write-Host "Saved pre-install cursor files are no longer available; restoring default Windows mouse pointers." -ForegroundColor Yellow
+                }
+                else {
+                    Write-Host "Restored default Windows mouse pointers." -ForegroundColor Green
+                }
                 Restore-WindowsDefaultCursors $cursorsKey
-                Write-Host "Restored default Windows mouse pointers." -ForegroundColor Green
             }
             if (-not $SkipCursorRefresh) {
                 Refresh-WindowsCursors
@@ -278,19 +310,54 @@ if ($manifest) {
             Write-Host "Current cursor scheme was changed by user ($currentDefault); keeping current cursor settings." -ForegroundColor Yellow
         }
 
+        $schemeRecordMap = @{}
+        if ($manifest.managedSchemeRecords) {
+            foreach ($prop in $manifest.managedSchemeRecords.PSObject.Properties) {
+                $schemeRecordMap[$prop.Name] = $prop.Value
+            }
+        }
+
         if (Test-Path $schemesKey) {
-            $props = Get-ItemProperty -Path $schemesKey
-            foreach ($p in $props.PSObject.Properties) {
-                if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
-                $valStr = [string]$p.Value
-                $firstPath = ($valStr -split ',')[0]
-                $normFirst = Normalize-BibataPath $firstPath
-                $isManagedScheme = ($managedFileNormSet.Contains($normFirst)) -or
-                    (Test-PathUnderAny $firstPath $managedCursorDirs) -or
-                    (Test-PathUnderAny $firstPath $managedDirs) -or
-                    (($managedSchemes -contains $p.Name) -and (Test-PathUnderAny $firstPath $possibleBibataDirs))
-                if ($isManagedScheme) {
-                    Remove-ItemProperty -Path $schemesKey -Name $p.Name -ErrorAction SilentlyContinue
+            $schemesRegItem = Get-Item -Path $schemesKey -ErrorAction SilentlyContinue
+            if ($schemesRegItem) {
+                $schemeNames = @($schemesRegItem.GetValueNames())
+                foreach ($valName in $schemeNames) {
+                    if ([string]::IsNullOrEmpty($valName)) { continue }
+                    $rawVal = [string]$schemesRegItem.GetValue($valName, "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $matchedKey = $null
+                    foreach ($rk in $schemeRecordMap.Keys) {
+                        if ([string]::Equals([string]$rk, $valName, [StringComparison]::OrdinalIgnoreCase)) {
+                            $matchedKey = $rk
+                            break
+                        }
+                    }
+
+                    if ($null -ne $matchedKey) {
+                        $rec = $schemeRecordMap[$matchedKey]
+                        if ([string]::Equals($rawVal, [string]$rec.writtenValue, [StringComparison]::OrdinalIgnoreCase)) {
+                            if ([bool]$rec.existedBefore) {
+                                $prevKind = if ([string]::IsNullOrWhiteSpace([string]$rec.previousKind)) { "String" } else { [string]$rec.previousKind }
+                                Set-ItemProperty -Path $schemesKey -Name $valName -Value ([string]$rec.previousValue) -Type $prevKind
+                            }
+                            else {
+                                Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
+                            }
+                        }
+                        else {
+                            Write-Host "Scheme '$valName' was modified after install; preserving current value." -ForegroundColor Yellow
+                        }
+                    }
+                    else {
+                        $firstPath = ($rawVal -split ',')[0]
+                        $normFirst = Normalize-BibataPath $firstPath
+                        $isManagedScheme = ($managedFileNormSet.Contains($normFirst)) -or
+                            (Test-PathUnderAny $firstPath $managedCursorDirs) -or
+                            (Test-PathUnderAny $firstPath $managedDirs) -or
+                            (($managedSchemes -contains $valName) -and (Test-PathUnderAny $firstPath $possibleBibataDirs))
+                        if ($isManagedScheme) {
+                            Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
+                        }
+                    }
                 }
             }
         }
@@ -323,10 +390,38 @@ if ($manifest) {
                 }
             }
             else {
-                # Legacy v1 manifest
+                # Legacy v1 manifest: clean only known Bibata cursor files inside size folders; preserve any unknown/private files
+                $knownBibataFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+                foreach ($kf in @(
+                    "Pointer.cur", "Help.cur", "Work.ani", "Busy.ani", "Cross.cur", "Text.cur",
+                    "Handwriting.cur", "Unavailable.cur", "Vert.cur", "Horz.cur", "Dgn1.cur", "Dgn2.cur",
+                    "Move.cur", "Alternate.cur", "Link.cur", "Pin.cur", "Person.cur"
+                )) {
+                    $knownBibataFiles.Add($kf) | Out-Null
+                }
                 foreach ($md in $managedDirs) {
-                    if (-not [string]::IsNullOrWhiteSpace($md) -and (Test-Path -LiteralPath $md)) {
-                        Remove-Item -LiteralPath $md -Recurse -Force -ErrorAction SilentlyContinue
+                    if ([string]::IsNullOrWhiteSpace($md) -or -not (Test-Path -LiteralPath $md -PathType Container)) { continue }
+                    $sizeSubDirs = @(Get-ChildItem -LiteralPath $md -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
+                        $_.Name -match '^(?i)Bibata-(?:Modern|Original)-Ice-(?:Regular|Large|Extra-Large)-Windows$'
+                    })
+                    foreach ($sd in $sizeSubDirs) {
+                        $filesInSize = @(Get-ChildItem -LiteralPath $sd.FullName -File -Force -ErrorAction SilentlyContinue)
+                        foreach ($f in $filesInSize) {
+                            if ($knownBibataFiles.Contains($f.Name)) {
+                                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                            }
+                        }
+                        $remSize = @(Get-ChildItem -LiteralPath $sd.FullName -Force -ErrorAction SilentlyContinue)
+                        if ($remSize.Count -eq 0) {
+                            Remove-Item -LiteralPath $sd.FullName -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                    $remTheme = @(Get-ChildItem -LiteralPath $md -Force -ErrorAction SilentlyContinue)
+                    if ($remTheme.Count -eq 0) {
+                        Remove-Item -LiteralPath $md -Force -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        Write-Host "Preserving non-empty theme directory with unknown/user files (v1 manifest): $md" -ForegroundColor Yellow
                     }
                 }
             }
