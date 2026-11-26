@@ -28,6 +28,8 @@
     - `Ctrl + Alt + Shift + D`：一键循环切换 **光影大小/强度预设**（`轻盈 Light` → `标准 Standard` → `灵动 Vivid`），伴随对应粗细的预览光环并自动保存。
   - **全屏应用自动暂停**（仅在独占全屏 Direct3D 游戏时自动隐藏）& **开机自动启动**（安装时默认开启）。
   - **可选托盘菜单 / 配置文件定制**：如需临时呼出托盘菜单切换预设、自定义颜色或单独开关某项特效，可在安装目录 `Bibata-Ice-Trail\config.ini` 中添加 `ShowTrayIcon=true` 后重启，或在启动程序时传入 `--show-tray` 参数；也可直接修改 `config.ini` 中的键值（常用键：`Enabled`、`TrailEnabled`、`ClickRippleEnabled`、`DragGlowEnabled`、`ShakeLocateEnabled`、`ScrollGlowEnabled`、`HotkeyEnabled`、`Preset`、`Palette`、`CustomColor`、`AutoPauseFullscreen`、`ShowTrayIcon`）。
+  - **轻量省内存与磁盘去重**：鼠标静止 3 秒后自动回收大尺寸渲染缓存并压缩堆内存；安装脚本默认自动清理未使用的冗余光标附件，并对重复大动画文件做 NTFS 硬链接去重（磁盘占用从 ~10 MB 降至 ~5.6 MB，亦可传 `-SingleSize` 进一步精简）。
+  - **系统安全层边界说明**：光影覆盖层会自动刷新置顶以覆盖普通置顶窗口和右键菜单；Windows 11 的**开始菜单、快捷设置/控制中心、锁屏与 UAC 弹窗**位于系统保护的高层级窗口带（Window Band），出于系统安全限制会渲染在用户态悬浮特效之上。
   - **多款光影配色**：支持 `冰蓝 Ice`（`0`）、`极光青 Cyan`（`1`）、`霜白 Frost`（`2`）、**`粉蓝幻梦 PinkBlue`（`4`，樱花粉 ↔ 冰蓝动态双色渐变）**、**`流光七彩 Rainbow`（`5`，全光谱流动虹彩渐变）** 以及自定义纯色（`3` + `CustomColor`）。
   - 托盘菜单开启后支持：
     - 左键单击快速暂停 / 启用；右键独立开关各项特效
@@ -56,6 +58,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Palette Rainbow
 
 # 如果已经装过指针，只安装流光与点击波纹
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipCursor
+
+# 极简磁盘模式：仅保留当前选中的指针尺寸（不保留其余尺寸用于 S 键切换）
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -SingleSize
 ```
 
 - 默认安装路径：若存在 `D:\Software` 则装入 `D:\Software\Cursors`，否则自动装入 `%LOCALAPPDATA%\BibataIceGlow`。

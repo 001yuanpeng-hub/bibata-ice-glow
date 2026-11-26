@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -1446,14 +1447,13 @@ namespace BibataIceTrail
             outH = bottom - outY;
 
             if (outW <= 0 || outH <= 0) return false;
-            if (outW > 4096) outW = 4096;
-            if (outH > 4096) outH = 4096;
-
-            EnsureBuffers(outW, outH);
-            EnsureDib(outW, outH);
-            if (_dibBits == IntPtr.Zero) return false;
+            if (outW > 2560) outW = 2560;
+            if (outH > 1600) outH = 1600;
 
             bool trackColor = (palette.Mode != PaletteMode.Solid);
+            EnsureBuffers(outW, outH, trackColor);
+            EnsureDib(outW, outH);
+            if (_dibBits == IntPtr.Zero) return false;
             if (hasTrail)
             {
                 AccumulateSdf(outX, outY, outW, outH, baseCoreR, baseHaloR, trackColor);
@@ -1642,7 +1642,7 @@ namespace BibataIceTrail
             return t * t * (3.0f - 2.0f * t);
         }
 
-        private void EnsureBuffers(int w, int h)
+        private void EnsureBuffers(int w, int h, bool needColor)
         {
             int needed = w * h;
             if (_haloBuf.Length < needed)
@@ -1650,7 +1650,18 @@ namespace BibataIceTrail
                 int newCap = Math.Max(needed, 65536);
                 _haloBuf = new float[newCap];
                 _coreBuf = new float[newCap];
-                _colorBuf = new float[newCap];
+            }
+            if (needColor)
+            {
+                if (_colorBuf.Length < needed)
+                {
+                    int newCap = Math.Max(needed, 65536);
+                    _colorBuf = new float[newCap];
+                }
+            }
+            else if (_colorBuf.Length == 0)
+            {
+                _colorBuf = new float[1];
             }
         }
 
@@ -1661,10 +1672,10 @@ namespace BibataIceTrail
                 return;
             }
 
-            int newW = Math.Max(w, _dibWidth);
-            int newH = Math.Max(h, _dibHeight);
-            if (newW < 256) newW = 256;
-            if (newH < 256) newH = 256;
+            int reqW = Math.Max(w, 256);
+            int reqH = Math.Max(h, 256);
+            int newW = (reqW + 63) & ~63;
+            int newH = (reqH + 63) & ~63;
 
             DisposeDibOnly();
 
@@ -1686,6 +1697,36 @@ namespace BibataIceTrail
                 _oldBitmap = NativeMethods.SelectObject(_memDC, _dibBitmap);
                 _dibWidth = newW;
                 _dibHeight = newH;
+            }
+        }
+
+        public bool TrimIfOversized()
+        {
+            bool trimmed = false;
+            if (_dibWidth * _dibHeight > 131072)
+            {
+                DisposeDibOnly();
+                trimmed = true;
+            }
+            if (_haloBuf.Length > 131072 || _coreBuf.Length > 131072 || _colorBuf.Length > 131072)
+            {
+                _haloBuf = new float[65536];
+                _coreBuf = new float[65536];
+                _colorBuf = new float[1];
+                trimmed = true;
+            }
+            return trimmed;
+        }
+
+        public static void CompactManagedHeapOnce()
+        {
+            try
+            {
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(2, GCCollectionMode.Forced, true);
+            }
+            catch
+            {
             }
         }
 
@@ -2557,6 +2598,10 @@ namespace BibataIceTrail
                 long lastFullscreenCheck = 0;
                 bool fullscreenPaused = false;
                 long fullscreenInterval = (long)(0.30 * Stopwatch.Frequency);
+                long idleSinceTicks = 0;
+                long trimDelayTicks = (long)(3.0 * Stopwatch.Frequency);
+                long lastZRefreshTicks = 0;
+                long zRefreshInterval = (long)(0.25 * Stopwatch.Frequency);
                 int lastIdleX = int.MinValue;
                 int lastIdleY = int.MinValue;
 
@@ -2609,6 +2654,11 @@ namespace BibataIceTrail
                             NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
                             isShown = false;
                         }
+                        if (renderer.TrimIfOversized())
+                        {
+                            TrailRenderer.CompactManagedHeapOnce();
+                        }
+                        idleSinceTicks = 0;
                         _buffer.Clear();
                         _ripples.Clear();
                         _interaction.Clear();
@@ -2650,28 +2700,12 @@ namespace BibataIceTrail
 
                     if (count < 2 && rippleCount == 0 && !hasShake && !hasDrag && !hasScroll && !hasPreview)
                     {
-                        if (isShown)
+                        if (!WaitAndHandleIdle(
+                            renderer, waitHandles, nowTicks, trimDelayTicks,
+                            trailEnabled, shakeEnabled, dragEnabled,
+                            ref isShown, ref idleSinceTicks, ref lastIdleX, ref lastIdleY))
                         {
-                            NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
-                            isShown = false;
-                        }
-                        uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, 25, NativeMethods.QS_ALLINPUT);
-                        if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) break;
-                        NativeMethods.POINT idlePt;
-                        if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
-                        {
-                            long idleTicks = Stopwatch.GetTimestamp();
-                            lastIdleX = idlePt.X;
-                            lastIdleY = idlePt.Y;
-                            if (trailEnabled)
-                            {
-                                _buffer.Push(idlePt.X, idlePt.Y, idleTicks);
-                            }
-                            if (shakeEnabled || dragEnabled)
-                            {
-                                uint idleDpi = NativeMethods.GetDpiAtPoint(idlePt.X, idlePt.Y);
-                                _interaction.OnCursorMove(idlePt.X, idlePt.Y, idleTicks, idleDpi, shakeEnabled, dragEnabled);
-                            }
+                            break;
                         }
                         continue;
                     }
@@ -2691,31 +2725,17 @@ namespace BibataIceTrail
 
                     if (!hasPixels)
                     {
-                        if (isShown)
+                        if (!WaitAndHandleIdle(
+                            renderer, waitHandles, nowTicks, trimDelayTicks,
+                            trailEnabled, shakeEnabled, dragEnabled,
+                            ref isShown, ref idleSinceTicks, ref lastIdleX, ref lastIdleY))
                         {
-                            NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
-                            isShown = false;
-                        }
-                        uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, 25, NativeMethods.QS_ALLINPUT);
-                        if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) break;
-                        NativeMethods.POINT idlePt;
-                        if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
-                        {
-                            long idleTicks = Stopwatch.GetTimestamp();
-                            lastIdleX = idlePt.X;
-                            lastIdleY = idlePt.Y;
-                            if (trailEnabled)
-                            {
-                                _buffer.Push(idlePt.X, idlePt.Y, idleTicks);
-                            }
-                            if (shakeEnabled || dragEnabled)
-                            {
-                                uint idleDpi = NativeMethods.GetDpiAtPoint(idlePt.X, idlePt.Y);
-                                _interaction.OnCursorMove(idlePt.X, idlePt.Y, idleTicks, idleDpi, shakeEnabled, dragEnabled);
-                            }
+                            break;
                         }
                         continue;
                     }
+
+                    idleSinceTicks = 0;
 
                     NativeMethods.POINT ptDst = new NativeMethods.POINT();
                     ptDst.X = bx;
@@ -2751,6 +2771,16 @@ namespace BibataIceTrail
                             0, 0, 0, 0,
                             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
                         isShown = true;
+                        lastZRefreshTicks = nowTicks;
+                    }
+                    else if ((nowTicks - lastZRefreshTicks) >= zRefreshInterval)
+                    {
+                        NativeMethods.SetWindowPos(
+                            _hwnd,
+                            NativeMethods.HWND_TOPMOST,
+                            0, 0, 0, 0,
+                            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+                        lastZRefreshTicks = nowTicks;
                     }
 
                     int hr = 0;
@@ -2774,6 +2804,57 @@ namespace BibataIceTrail
                 NativeMethods.DestroyWindow(_hwnd);
                 _hwnd = IntPtr.Zero;
             }
+        }
+
+        private bool WaitAndHandleIdle(
+            TrailRenderer renderer,
+            IntPtr[] waitHandles,
+            long nowTicks,
+            long trimDelayTicks,
+            bool trailEnabled,
+            bool shakeEnabled,
+            bool dragEnabled,
+            ref bool isShown,
+            ref long idleSinceTicks,
+            ref int lastIdleX,
+            ref int lastIdleY)
+        {
+            if (isShown)
+            {
+                NativeMethods.ShowWindow(_hwnd, NativeMethods.SW_HIDE);
+                isShown = false;
+            }
+            if (idleSinceTicks == 0)
+            {
+                idleSinceTicks = nowTicks;
+            }
+            else if ((nowTicks - idleSinceTicks) >= trimDelayTicks)
+            {
+                if (renderer.TrimIfOversized())
+                {
+                    TrailRenderer.CompactManagedHeapOnce();
+                }
+                idleSinceTicks = nowTicks;
+            }
+            uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, 25, NativeMethods.QS_ALLINPUT);
+            if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) return false;
+            NativeMethods.POINT idlePt;
+            if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
+            {
+                long idleTicks = Stopwatch.GetTimestamp();
+                lastIdleX = idlePt.X;
+                lastIdleY = idlePt.Y;
+                if (trailEnabled)
+                {
+                    _buffer.Push(idlePt.X, idlePt.Y, idleTicks);
+                }
+                if (shakeEnabled || dragEnabled)
+                {
+                    uint idleDpi = NativeMethods.GetDpiAtPoint(idlePt.X, idlePt.Y);
+                    _interaction.OnCursorMove(idlePt.X, idlePt.Y, idleTicks, idleDpi, shakeEnabled, dragEnabled);
+                }
+            }
+            return true;
         }
 
         public void Dispose()
@@ -2977,6 +3058,10 @@ namespace BibataIceTrail
         private volatile bool _shakeEnabled = true;
         private volatile bool _dragEnabled = true;
         private volatile bool _scrollEnabled = true;
+        private uint _cachedDpi = 96;
+        private int _cachedDpiX = int.MinValue;
+        private int _cachedDpiY = int.MinValue;
+        private long _cachedDpiTicks;
 
         public RawInputMessageWindow(
             SampleRingBuffer buffer,
@@ -3138,8 +3223,17 @@ namespace BibataIceTrail
                     bool dragOn = _dragEnabled;
                     if (shakeOn || dragOn)
                     {
-                        uint dpi = NativeMethods.GetDpiAtPoint(pt.X, pt.Y);
-                        _interaction.OnCursorMove(pt.X, pt.Y, nowTicks, dpi, shakeOn, dragOn);
+                        long dpiAge = nowTicks - _cachedDpiTicks;
+                        int ddx = pt.X - _cachedDpiX;
+                        int ddy = pt.Y - _cachedDpiY;
+                        if (_cachedDpiTicks == 0 || dpiAge < 0 || dpiAge >= (Stopwatch.Frequency / 5L) || ddx > 64 || ddx < -64 || ddy > 64 || ddy < -64)
+                        {
+                            _cachedDpi = NativeMethods.GetDpiAtPoint(pt.X, pt.Y);
+                            _cachedDpiX = pt.X;
+                            _cachedDpiY = pt.Y;
+                            _cachedDpiTicks = nowTicks;
+                        }
+                        _interaction.OnCursorMove(pt.X, pt.Y, nowTicks, _cachedDpi, shakeOn, dragOn);
                     }
 
                     _buffer.Push(pt.X, pt.Y, nowTicks);
@@ -4033,6 +4127,46 @@ namespace BibataIceTrail
                     }
                     bool previewOk = pvOk && previewPixels >= 80;
 
+                    TrailSample[] bigSamples = new TrailSample[3];
+                    bigSamples[0].X = 200;
+                    bigSamples[0].Y = 200;
+                    bigSamples[0].Ticks = nowTicks - (long)(30.0 * freq / 1000.0);
+                    bigSamples[0].StrokeId = 1;
+                    bigSamples[1].X = 500;
+                    bigSamples[1].Y = 360;
+                    bigSamples[1].Ticks = nowTicks - (long)(15.0 * freq / 1000.0);
+                    bigSamples[1].StrokeId = 1;
+                    bigSamples[2].X = 800;
+                    bigSamples[2].Y = 520;
+                    bigSamples[2].Ticks = nowTicks;
+                    bigSamples[2].StrokeId = 1;
+                    int lbx, lby, lbw, lbh;
+                    bool bigOk = renderer.RenderFrame(bigSamples, 3, true, null, 0, false, 800, 520, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, pbPal, out lbx, out lby, out lbw, out lbh);
+                    bool didTrim = renderer.TrimIfOversized();
+                    int recX, recY, recW, recH;
+                    bool recOk = renderer.RenderFrame(null, 0, true, ripples, ripples.Length, true, 720, 300, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out recX, out recY, out recW, out recH);
+                    int recPixels = 0;
+                    if (recOk && renderer.DibBits != IntPtr.Zero)
+                    {
+                        uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+                        int stride = renderer.DibWidth;
+                        for (int y = 0; y < recH; y++)
+                        {
+                            uint* row = dibBase + y * stride;
+                            for (int x = 0; x < recW; x++)
+                            {
+                                uint px = row[x];
+                                byte a = (byte)(px >> 24);
+                                byte r = (byte)((px >> 16) & 0xFF);
+                                byte g = (byte)((px >> 8) & 0xFF);
+                                byte b = (byte)(px & 0xFF);
+                                if (a > 0) recPixels++;
+                                if (r > a || g > a || b > a) alphaViolations++;
+                            }
+                        }
+                    }
+                    bool trimRecoverOk = bigOk && didTrim && recOk && recPixels >= 100;
+
                     bool cursorSizeLogicOk =
                         string.Equals(CursorSizeManager.ParseSizeFromFolderName("Bibata-Modern-Ice-Large-Windows"), "Large", StringComparison.Ordinal) &&
                         string.Equals(CursorSizeManager.ParseSizeFromFolderName("Bibata-Original-Ice-Extra-Large-Windows"), "Extra-Large", StringComparison.Ordinal) &&
@@ -4041,15 +4175,15 @@ namespace BibataIceTrail
                         string.Equals(CursorSizeManager.GetNextSize("Extra-Large"), "Regular", StringComparison.Ordinal);
 
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} cursorSizeLogicOk={17} silentDefaultOk={18} headerSize={19} alphaViolations={20} elapsedMs={21:F3} fullscreenBusy={22} ulwOk={23} ulwErr={24} ridOk={25} ridErr={26}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} cursorSizeLogicOk={18} silentDefaultOk={19} headerSize={20} alphaViolations={21} elapsedMs={22:F3} fullscreenBusy={23} ulwOk={24} ulwErr={25} ridOk={26} ridErr={27}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !trimRecoverOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
                     {
                         return 1;
                     }

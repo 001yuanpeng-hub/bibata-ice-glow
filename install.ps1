@@ -7,6 +7,7 @@ param(
     [string]$Size = "Regular",
     [ValidateSet("", "Ice", "Cyan", "Frost", "PinkBlue", "Rainbow")]
     [string]$Palette = "",
+    [switch]$SingleSize,
     [switch]$SkipCursor,
     [switch]$SkipTrail,
     [switch]$NoAutoStart,
@@ -78,6 +79,50 @@ if (-not $SkipCursor) {
     }
     else {
         Write-Host "Cursor files already present at $cursorDir" -ForegroundColor Green
+    }
+
+    $sizeDirs = Get-ChildItem -Path $themeRoot -Directory -Filter "$themeName-*-Windows" -ErrorAction SilentlyContinue
+    if ($SingleSize) {
+        foreach ($sd in $sizeDirs) {
+            if ($sd.Name -ne $sizeDirName) {
+                Remove-Item -Path $sd.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        $sizeDirs = @($sizeDirs | Where-Object { $_.Name -eq $sizeDirName })
+    }
+
+    $unusedExtras = @("install.inf", "uninstall.bat", "Zoom-in.cur", "Zoom-out.cur", "Pan.cur", "Grabbing.cur")
+    $hashTable = @{}
+    foreach ($sd in $sizeDirs) {
+        foreach ($ex in $unusedExtras) {
+            $exPath = Join-Path $sd.FullName $ex
+            if (Test-Path $exPath) {
+                Remove-Item -Path $exPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if (-not $SingleSize) {
+            $curFiles = Get-ChildItem -Path $sd.FullName -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 65536 }
+            foreach ($cf in $curFiles) {
+                $h = (Get-FileHash -Path $cf.FullName -Algorithm SHA256).Hash
+                if ($hashTable.ContainsKey($h)) {
+                    $target = $hashTable[$h]
+                    $backup = "$($cf.FullName).dedup.tmp"
+                    try {
+                        Move-Item -Path $cf.FullName -Destination $backup -Force
+                        New-Item -ItemType HardLink -Path $cf.FullName -Value $target -ErrorAction Stop | Out-Null
+                        Remove-Item -Path $backup -Force -ErrorAction SilentlyContinue
+                    }
+                    catch {
+                        if (Test-Path $backup) {
+                            Move-Item -Path $backup -Destination $cf.FullName -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+                else {
+                    $hashTable[$h] = $cf.FullName
+                }
+            }
+        }
     }
 
     $roleMap = [ordered]@{
