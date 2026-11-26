@@ -154,6 +154,21 @@ function Test-CursorStateValid($prevState) {
     return $true
 }
 
+function Test-SchemeValueValid([string]$schemeVal) {
+    if ($null -eq $schemeVal) { return $false }
+    if ([string]::IsNullOrWhiteSpace($schemeVal)) { return $true }
+    $parts = $schemeVal -split ','
+    foreach ($part in $parts) {
+        $trimmed = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables($trimmed)
+        if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Restore-WindowsDefaultCursors([string]$cursorsPath) {
     if (-not (Test-Path $cursorsPath)) { return }
     Set-ItemProperty -Path $cursorsPath -Name "(Default)" -Value "" -Type String
@@ -313,7 +328,53 @@ if ($manifest) {
         $schemeRecordMap = @{}
         if ($manifest.managedSchemeRecords) {
             foreach ($prop in $manifest.managedSchemeRecords.PSObject.Properties) {
-                $schemeRecordMap[$prop.Name] = $prop.Value
+                $recVal = $prop.Value
+                if ($recVal) {
+                    $schemeRecordMap[$prop.Name] = [ordered]@{
+                        existedBefore  = [bool]$recVal.existedBefore
+                        previousValue  = $recVal.previousValue
+                        previousKind   = if ([string]::IsNullOrWhiteSpace([string]$recVal.previousKind)) { "String" } else { [string]$recVal.previousKind }
+                        writtenValues  = New-Object System.Collections.Generic.List[string]
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$recVal.writtenValue)) {
+                        $schemeRecordMap[$prop.Name].writtenValues.Add([string]$recVal.writtenValue)
+                    }
+                }
+            }
+        }
+        $rtSchemesPath = Join-Path $InstallDir "bibata-runtime-schemes.json"
+        if (Test-Path -LiteralPath $rtSchemesPath -PathType Leaf) {
+            try {
+                $rtList = Get-Content -LiteralPath $rtSchemesPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                foreach ($rtItem in @($rtList)) {
+                    if (-not $rtItem -or [string]::IsNullOrWhiteSpace([string]$rtItem.name)) { continue }
+                    $rtName = [string]$rtItem.name
+                    $existingKey = $null
+                    foreach ($rk in $schemeRecordMap.Keys) {
+                        if ([string]::Equals([string]$rk, $rtName, [StringComparison]::OrdinalIgnoreCase)) {
+                            $existingKey = $rk
+                            break
+                        }
+                    }
+                    if ($null -eq $existingKey) {
+                        $schemeRecordMap[$rtName] = [ordered]@{
+                            existedBefore = [bool]$rtItem.existedBefore
+                            previousValue = $rtItem.previousValue
+                            previousKind  = if ([string]::IsNullOrWhiteSpace([string]$rtItem.previousKind)) { "String" } else { [string]$rtItem.previousKind }
+                            writtenValues = New-Object System.Collections.Generic.List[string]
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
+                            $schemeRecordMap[$rtName].writtenValues.Add([string]$rtItem.writtenValue)
+                        }
+                    }
+                    else {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
+                            $schemeRecordMap[$existingKey].writtenValues.Add([string]$rtItem.writtenValue)
+                        }
+                    }
+                }
+            }
+            catch {
             }
         }
 
@@ -334,10 +395,23 @@ if ($manifest) {
 
                     if ($null -ne $matchedKey) {
                         $rec = $schemeRecordMap[$matchedKey]
-                        if ([string]::Equals($rawVal, [string]$rec.writtenValue, [StringComparison]::OrdinalIgnoreCase)) {
+                        $matchesWritten = $false
+                        foreach ($wv in $rec.writtenValues) {
+                            if ([string]::Equals($rawVal, [string]$wv, [StringComparison]::OrdinalIgnoreCase)) {
+                                $matchesWritten = $true
+                                break
+                            }
+                        }
+                        if ($matchesWritten) {
                             if ([bool]$rec.existedBefore) {
-                                $prevKind = if ([string]::IsNullOrWhiteSpace([string]$rec.previousKind)) { "String" } else { [string]$rec.previousKind }
-                                Set-ItemProperty -Path $schemesKey -Name $valName -Value ([string]$rec.previousValue) -Type $prevKind
+                                if (Test-SchemeValueValid ([string]$rec.previousValue)) {
+                                    $prevKind = if ([string]::IsNullOrWhiteSpace([string]$rec.previousKind)) { "String" } else { [string]$rec.previousKind }
+                                    Set-ItemProperty -Path $schemesKey -Name $valName -Value ([string]$rec.previousValue) -Type $prevKind
+                                }
+                                else {
+                                    Write-Host "Saved pre-install scheme '$valName' references missing files; removing dead scheme entry." -ForegroundColor Yellow
+                                    Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
+                                }
                             }
                             else {
                                 Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
@@ -472,6 +546,10 @@ if (-not $KeepFiles) {
     }
     if (Test-Path -LiteralPath $manifestPath) {
         Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+    }
+    $rtSchemesCleanup = Join-Path $InstallDir "bibata-runtime-schemes.json"
+    if (Test-Path -LiteralPath $rtSchemesCleanup) {
+        Remove-Item -LiteralPath $rtSchemesCleanup -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path -LiteralPath $InstallDir) {
         $remaining = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)

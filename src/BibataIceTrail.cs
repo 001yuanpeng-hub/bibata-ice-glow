@@ -3174,13 +3174,24 @@ namespace BibataIceTrail
 
         public static bool CycleInstalledCursorSize(string exePath)
         {
+            return CycleInstalledCursorSize(exePath, @"Control Panel\Cursors", true);
+        }
+
+        public static bool CycleInstalledCursorSize(string exePath, string cursorsSubKeyPath, bool refreshSystemCursors)
+        {
             try
             {
+                if (string.IsNullOrEmpty(cursorsSubKeyPath))
+                {
+                    cursorsSubKeyPath = @"Control Panel\Cursors";
+                }
+                string schemesSubKeyPath = cursorsSubKeyPath + @"\Schemes";
+
                 string themeRoot = null;
                 string themeName = null;
                 string currentSize = "Regular";
 
-                using (RegistryKey cursorsKey = Registry.CurrentUser.OpenSubKey(@"Control Panel\Cursors", false))
+                using (RegistryKey cursorsKey = Registry.CurrentUser.OpenSubKey(cursorsSubKeyPath, false))
                 {
                     if (cursorsKey != null)
                     {
@@ -3206,11 +3217,11 @@ namespace BibataIceTrail
                 if (string.IsNullOrEmpty(themeRoot) || string.IsNullOrEmpty(themeName))
                 {
                     string exeDir = Path.GetDirectoryName(exePath);
-                    string installRoot = string.IsNullOrEmpty(exeDir) ? null : Path.GetDirectoryName(exeDir);
-                    if (!string.IsNullOrEmpty(installRoot))
+                    string installRootFallback = string.IsNullOrEmpty(exeDir) ? null : Path.GetDirectoryName(exeDir);
+                    if (!string.IsNullOrEmpty(installRootFallback))
                     {
-                        string modernRoot = Path.Combine(installRoot, "Bibata-Modern-Ice");
-                        string origRoot = Path.Combine(installRoot, "Bibata-Original-Ice");
+                        string modernRoot = Path.Combine(installRootFallback, "Bibata-Modern-Ice");
+                        string origRoot = Path.Combine(installRootFallback, "Bibata-Original-Ice");
                         if (Directory.Exists(modernRoot))
                         {
                             themeRoot = modernRoot;
@@ -3257,15 +3268,50 @@ namespace BibataIceTrail
                 }
 
                 string schemeName = themeName + " (" + targetSize + ")";
-                using (RegistryKey schemesKey = Registry.CurrentUser.CreateSubKey(@"Control Panel\Cursors\Schemes"))
+                string schemeValue = string.Join(",", paths);
+                string installRoot = Path.GetDirectoryName(themeRoot);
+                string runtimeBackupPath = string.IsNullOrEmpty(installRoot)
+                    ? null
+                    : Path.Combine(installRoot, "bibata-runtime-schemes.json");
+
+                using (RegistryKey schemesKey = Registry.CurrentUser.CreateSubKey(schemesSubKeyPath))
                 {
                     if (schemesKey != null)
                     {
-                        schemesKey.SetValue(schemeName, string.Join(",", paths), RegistryValueKind.String);
+                        bool existedBefore = false;
+                        string previousValue = null;
+                        string previousKind = "String";
+                        object existingObj = schemesKey.GetValue(schemeName, null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+                        if (existingObj != null)
+                        {
+                            existedBefore = true;
+                            previousValue = existingObj.ToString();
+                            try
+                            {
+                                previousKind = schemesKey.GetValueKind(schemeName).ToString();
+                            }
+                            catch
+                            {
+                                previousKind = "String";
+                            }
+                        }
+
+                        bool alreadyMatches = existedBefore &&
+                            string.Equals(previousValue, schemeValue, StringComparison.OrdinalIgnoreCase);
+
+                        if (!alreadyMatches)
+                        {
+                            bool backupSaved = !string.IsNullOrEmpty(runtimeBackupPath) &&
+                                TryPersistRuntimeSchemeRecord(runtimeBackupPath, schemeName, existedBefore, previousKind, previousValue, schemeValue);
+                            if (backupSaved)
+                            {
+                                schemesKey.SetValue(schemeName, schemeValue, RegistryValueKind.String);
+                            }
+                        }
                     }
                 }
 
-                using (RegistryKey cursorsKey = Registry.CurrentUser.CreateSubKey(@"Control Panel\Cursors"))
+                using (RegistryKey cursorsKey = Registry.CurrentUser.CreateSubKey(cursorsSubKeyPath))
                 {
                     if (cursorsKey == null) return false;
                     cursorsKey.SetValue("", schemeName, RegistryValueKind.String);
@@ -3276,12 +3322,330 @@ namespace BibataIceTrail
                     }
                 }
 
+                if (!refreshSystemCursors)
+                {
+                    return true;
+                }
                 return NativeMethods.SystemParametersInfo(NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero, NativeMethods.SPIF_SENDCHANGE);
             }
             catch
             {
                 return false;
             }
+        }
+
+        internal sealed class RuntimeSchemeRecord
+        {
+            public string Name;
+            public bool ExistedBefore;
+            public string PreviousKind;
+            public string PreviousValue;
+            public string WrittenValue;
+        }
+
+        internal static bool TryPersistRuntimeSchemeRecord(
+            string path,
+            string schemeName,
+            bool existedBefore,
+            string previousKind,
+            string previousValue,
+            string writtenValue)
+        {
+            try
+            {
+                List<RuntimeSchemeRecord> records;
+                if (!TryLoadRuntimeSchemeRecords(path, out records))
+                {
+                    return false;
+                }
+
+                RuntimeSchemeRecord existing = null;
+                for (int i = 0; i < records.Count; i++)
+                {
+                    if (string.Equals(records[i].Name, schemeName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        existing = records[i];
+                        break;
+                    }
+                }
+
+                if (existing != null)
+                {
+                    existing.WrittenValue = writtenValue;
+                }
+                else
+                {
+                    RuntimeSchemeRecord rec = new RuntimeSchemeRecord();
+                    rec.Name = schemeName;
+                    rec.ExistedBefore = existedBefore;
+                    rec.PreviousKind = string.IsNullOrEmpty(previousKind) ? "String" : previousKind;
+                    rec.PreviousValue = existedBefore ? previousValue : null;
+                    rec.WrittenValue = writtenValue;
+                    records.Add(rec);
+                }
+
+                return TrySaveRuntimeSchemeRecords(path, records);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static string SerializeRuntimeSchemeRecords(List<RuntimeSchemeRecord> records)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("[\r\n");
+            for (int i = 0; i < records.Count; i++)
+            {
+                RuntimeSchemeRecord r = records[i];
+                sb.Append("  {");
+                sb.Append("\"name\":\"");
+                AppendJsonEscaped(sb, r.Name ?? "");
+                sb.Append("\",\"existedBefore\":");
+                sb.Append(r.ExistedBefore ? "true" : "false");
+                sb.Append(",\"previousKind\":\"");
+                AppendJsonEscaped(sb, string.IsNullOrEmpty(r.PreviousKind) ? "String" : r.PreviousKind);
+                sb.Append("\",\"previousValue\":");
+                if (r.PreviousValue == null)
+                {
+                    sb.Append("null");
+                }
+                else
+                {
+                    sb.Append("\"");
+                    AppendJsonEscaped(sb, r.PreviousValue);
+                    sb.Append("\"");
+                }
+                sb.Append(",\"writtenValue\":\"");
+                AppendJsonEscaped(sb, r.WrittenValue ?? "");
+                sb.Append("\"}");
+                if (i + 1 < records.Count) sb.Append(",");
+                sb.Append("\r\n");
+            }
+            sb.Append("]\r\n");
+            return sb.ToString();
+        }
+
+        private static void AppendJsonEscaped(StringBuilder sb, string s)
+        {
+            for (int i = 0; i < s.Length; i++)
+            {
+                char ch = s[i];
+                if (ch == '\\') sb.Append("\\\\");
+                else if (ch == '"') sb.Append("\\\"");
+                else if (ch == '\r') sb.Append("\\r");
+                else if (ch == '\n') sb.Append("\\n");
+                else if (ch == '\t') sb.Append("\\t");
+                else if (ch < 0x20) sb.AppendFormat(CultureInfo.InvariantCulture, "\\u{0:X4}", (int)ch);
+                else sb.Append(ch);
+            }
+        }
+
+        internal static bool TrySaveRuntimeSchemeRecords(string path, List<RuntimeSchemeRecord> records)
+        {
+            string tmpPath = null;
+            try
+            {
+                string dir = Path.GetDirectoryName(path);
+                if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+                string json = SerializeRuntimeSchemeRecords(records);
+                tmpPath = Path.Combine(dir, ".bibata-runtime-schemes." + Guid.NewGuid().ToString("N") + ".tmp");
+                File.WriteAllText(tmpPath, json, Encoding.UTF8);
+                File.Copy(tmpPath, path, true);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (!string.IsNullOrEmpty(tmpPath) && File.Exists(tmpPath))
+                {
+                    try { File.Delete(tmpPath); } catch { }
+                }
+            }
+        }
+
+        internal static bool TryLoadRuntimeSchemeRecords(string path, out List<RuntimeSchemeRecord> records)
+        {
+            records = new List<RuntimeSchemeRecord>();
+            try
+            {
+                if (!File.Exists(path)) return true;
+                string text = File.ReadAllText(path, Encoding.UTF8);
+                return TryParseRuntimeSchemeRecords(text, out records);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static bool TryParseRuntimeSchemeRecords(string json, out List<RuntimeSchemeRecord> records)
+        {
+            records = new List<RuntimeSchemeRecord>();
+            if (string.IsNullOrEmpty(json)) return false;
+            int pos = 0;
+            SkipJsonWs(json, ref pos);
+            if (pos >= json.Length || json[pos] != '[') return false;
+            pos++;
+            SkipJsonWs(json, ref pos);
+            if (pos < json.Length && json[pos] == ']') return true;
+
+            while (pos < json.Length)
+            {
+                SkipJsonWs(json, ref pos);
+                if (pos >= json.Length || json[pos] != '{') return false;
+                pos++;
+                RuntimeSchemeRecord rec = new RuntimeSchemeRecord();
+                rec.PreviousKind = "String";
+
+                SkipJsonWs(json, ref pos);
+                while (pos < json.Length && json[pos] != '}')
+                {
+                    string key;
+                    if (!ReadJsonString(json, ref pos, out key)) return false;
+                    SkipJsonWs(json, ref pos);
+                    if (pos >= json.Length || json[pos] != ':') return false;
+                    pos++;
+                    SkipJsonWs(json, ref pos);
+
+                    if (string.Equals(key, "existedBefore", StringComparison.Ordinal))
+                    {
+                        bool bVal;
+                        if (!ReadJsonBool(json, ref pos, out bVal)) return false;
+                        rec.ExistedBefore = bVal;
+                    }
+                    else
+                    {
+                        string sVal;
+                        if (!ReadJsonStringOrNull(json, ref pos, out sVal)) return false;
+                        if (string.Equals(key, "name", StringComparison.Ordinal)) rec.Name = sVal;
+                        else if (string.Equals(key, "previousKind", StringComparison.Ordinal)) rec.PreviousKind = sVal ?? "String";
+                        else if (string.Equals(key, "previousValue", StringComparison.Ordinal)) rec.PreviousValue = sVal;
+                        else if (string.Equals(key, "writtenValue", StringComparison.Ordinal)) rec.WrittenValue = sVal;
+                    }
+
+                    SkipJsonWs(json, ref pos);
+                    if (pos < json.Length && json[pos] == ',')
+                    {
+                        pos++;
+                        SkipJsonWs(json, ref pos);
+                    }
+                    else if (pos < json.Length && json[pos] == '}')
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                if (pos >= json.Length || json[pos] != '}') return false;
+                pos++;
+                if (!string.IsNullOrEmpty(rec.Name))
+                {
+                    records.Add(rec);
+                }
+
+                SkipJsonWs(json, ref pos);
+                if (pos < json.Length && json[pos] == ',')
+                {
+                    pos++;
+                    continue;
+                }
+                if (pos < json.Length && json[pos] == ']')
+                {
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        }
+
+        private static void SkipJsonWs(string s, ref int pos)
+        {
+            while (pos < s.Length)
+            {
+                char ch = s[pos];
+                if (ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n') pos++;
+                else break;
+            }
+        }
+
+        private static bool ReadJsonBool(string s, ref int pos, out bool val)
+        {
+            val = false;
+            if (pos + 4 <= s.Length && string.CompareOrdinal(s, pos, "true", 0, 4) == 0)
+            {
+                val = true;
+                pos += 4;
+                return true;
+            }
+            if (pos + 5 <= s.Length && string.CompareOrdinal(s, pos, "false", 0, 5) == 0)
+            {
+                val = false;
+                pos += 5;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool ReadJsonStringOrNull(string s, ref int pos, out string val)
+        {
+            val = null;
+            if (pos + 4 <= s.Length && string.CompareOrdinal(s, pos, "null", 0, 4) == 0)
+            {
+                pos += 4;
+                return true;
+            }
+            return ReadJsonString(s, ref pos, out val);
+        }
+
+        private static bool ReadJsonString(string s, ref int pos, out string val)
+        {
+            val = null;
+            if (pos >= s.Length || s[pos] != '"') return false;
+            pos++;
+            StringBuilder sb = new StringBuilder();
+            while (pos < s.Length)
+            {
+                char ch = s[pos++];
+                if (ch == '"')
+                {
+                    val = sb.ToString();
+                    return true;
+                }
+                if (ch == '\\')
+                {
+                    if (pos >= s.Length) return false;
+                    char esc = s[pos++];
+                    if (esc == '"' || esc == '\\' || esc == '/') sb.Append(esc);
+                    else if (esc == 'b') sb.Append('\b');
+                    else if (esc == 'f') sb.Append('\f');
+                    else if (esc == 'n') sb.Append('\n');
+                    else if (esc == 'r') sb.Append('\r');
+                    else if (esc == 't') sb.Append('\t');
+                    else if (esc == 'u' && pos + 4 <= s.Length)
+                    {
+                        int code;
+                        if (!int.TryParse(s.Substring(pos, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out code)) return false;
+                        sb.Append((char)code);
+                        pos += 4;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                else
+                {
+                    sb.Append(ch);
+                }
+            }
+            return false;
         }
     }
 
@@ -4003,6 +4367,24 @@ namespace BibataIceTrail
                 return RunSelfTest(logPath);
             }
 
+            if (args != null && args.Length >= 1 && string.Equals(args[0], "--cycle-cursor-size", StringComparison.OrdinalIgnoreCase))
+            {
+                string cursorsSubKey = @"Control Panel\Cursors";
+                bool noRefresh = false;
+                for (int i = 1; i < args.Length; i++)
+                {
+                    if (string.Equals(args[i], "--cursors-reg-key", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                    {
+                        cursorsSubKey = args[++i];
+                    }
+                    else if (string.Equals(args[i], "--no-refresh", StringComparison.OrdinalIgnoreCase))
+                    {
+                        noRefresh = true;
+                    }
+                }
+                return CursorSizeManager.CycleInstalledCursorSize(Application.ExecutablePath, cursorsSubKey, !noRefresh) ? 0 : 1;
+            }
+
             bool forceShowTray = false;
             string instanceSuffix = "SingleInstance";
             if (args != null)
@@ -4436,7 +4818,27 @@ namespace BibataIceTrail
                     }
                     bool trimRecoverOk = bigOk && didTrim && recOk && recPixels >= 100;
 
+                    List<CursorSizeManager.RuntimeSchemeRecord> rtSrc = new List<CursorSizeManager.RuntimeSchemeRecord>();
+                    CursorSizeManager.RuntimeSchemeRecord rtSample = new CursorSizeManager.RuntimeSchemeRecord();
+                    rtSample.Name = "Bibata-Modern-Ice (Large)";
+                    rtSample.ExistedBefore = true;
+                    rtSample.PreviousKind = "ExpandString";
+                    rtSample.PreviousValue = @"%SystemRoot%\cursors\aero_arrow.cur,C:\My ""Cur""\a.cur";
+                    rtSample.WrittenValue = @"D:\Cursors\Large\Pointer.cur";
+                    rtSrc.Add(rtSample);
+                    string rtJson = CursorSizeManager.SerializeRuntimeSchemeRecords(rtSrc);
+                    List<CursorSizeManager.RuntimeSchemeRecord> rtParsed;
+                    bool runtimeSchemeJsonOk =
+                        CursorSizeManager.TryParseRuntimeSchemeRecords(rtJson, out rtParsed) &&
+                        rtParsed.Count == 1 &&
+                        string.Equals(rtParsed[0].Name, rtSample.Name, StringComparison.Ordinal) &&
+                        rtParsed[0].ExistedBefore == true &&
+                        string.Equals(rtParsed[0].PreviousKind, "ExpandString", StringComparison.Ordinal) &&
+                        string.Equals(rtParsed[0].PreviousValue, rtSample.PreviousValue, StringComparison.Ordinal) &&
+                        string.Equals(rtParsed[0].WrittenValue, rtSample.WrittenValue, StringComparison.Ordinal);
+
                     bool cursorSizeLogicOk =
+                        runtimeSchemeJsonOk &&
                         string.Equals(CursorSizeManager.ParseSizeFromFolderName("Bibata-Modern-Ice-Large-Windows"), "Large", StringComparison.Ordinal) &&
                         string.Equals(CursorSizeManager.ParseSizeFromFolderName("Bibata-Original-Ice-Extra-Large-Windows"), "Extra-Large", StringComparison.Ordinal) &&
                         string.Equals(CursorSizeManager.GetNextSize("Regular"), "Large", StringComparison.Ordinal) &&

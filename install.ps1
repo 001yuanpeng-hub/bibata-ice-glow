@@ -315,6 +315,100 @@ function Resolve-InheritedCursorState($currentState, [string]$currentInstallDir)
     return $state
 }
 
+function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
+    if ([string]::IsNullOrWhiteSpace($installRoot) -or $null -eq $targetMap) { return }
+    $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
+    if (-not (Test-Path -LiteralPath $rtPath -PathType Leaf)) { return }
+    try {
+        $rtItems = Get-Content -LiteralPath $rtPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $rtItems) { return }
+        foreach ($item in @($rtItems)) {
+            if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) { continue }
+            $sName = [string]$item.name
+            if (-not $targetMap.Contains($sName)) {
+                $targetMap[$sName] = [ordered]@{
+                    existedBefore = [bool]$item.existedBefore
+                    previousValue = $item.previousValue
+                    previousKind  = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
+                    writtenValue  = [string]$item.writtenValue
+                }
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
+                $targetMap[$sName].writtenValue = [string]$item.writtenValue
+            }
+        }
+    }
+    catch {
+    }
+}
+
+function Resolve-InheritedSchemeSnapshot([string]$schemeName, $currentSnap, [string]$currentInstallDir) {
+    $snap = $currentSnap
+    if (-not $snap -or -not $snap.valExisted -or [string]::IsNullOrWhiteSpace([string]$snap.value)) {
+        return $snap
+    }
+    $visited = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $curNorm = Normalize-BibataPath $currentInstallDir
+    if (-not [string]::IsNullOrEmpty($curNorm)) {
+        $visited.Add($curNorm) | Out-Null
+    }
+
+    for ($hop = 0; $hop -lt 5; $hop++) {
+        $valStr = [string]$snap.value
+        $firstPath = ($valStr -split ',')[0]
+        if ([string]::IsNullOrWhiteSpace($firstPath)) { break }
+        if ($firstPath -notmatch '^(?i)(.+)\\Bibata-(?:Modern|Original)-Ice\\Bibata-(?:Modern|Original)-Ice-(?:Regular|Large|Extra-Large)-Windows\\[^\\]+$') {
+            break
+        }
+        $otherInstallDir = $Matches[1]
+        $otherNorm = Normalize-BibataPath $otherInstallDir
+        if ([string]::IsNullOrEmpty($otherNorm) -or $visited.Contains($otherNorm)) { break }
+        $visited.Add($otherNorm) | Out-Null
+
+        $otherRecs = New-Object 'System.Collections.Specialized.OrderedDictionary' ([StringComparer]::OrdinalIgnoreCase)
+        $otherManifestPath = Join-Path $otherInstallDir "bibata-ice-glow-manifest.json"
+        if (Test-Path -LiteralPath $otherManifestPath -PathType Leaf) {
+            try {
+                $om = Get-Content -LiteralPath $otherManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($om -and $om.managedSchemeRecords) {
+                    foreach ($prop in $om.managedSchemeRecords.PSObject.Properties) {
+                        $recObj = $prop.Value
+                        if ($recObj) {
+                            $otherRecs[$prop.Name] = [ordered]@{
+                                existedBefore = [bool]$recObj.existedBefore
+                                previousValue = $recObj.previousValue
+                                previousKind  = if ([string]::IsNullOrWhiteSpace([string]$recObj.previousKind)) { "String" } else { [string]$recObj.previousKind }
+                                writtenValue  = [string]$recObj.writtenValue
+                            }
+                        }
+                    }
+                }
+            }
+            catch {
+            }
+        }
+        Import-RuntimeSchemeRecords $otherInstallDir $otherRecs
+
+        if (-not $otherRecs.Contains($schemeName)) { break }
+        $otherRec = $otherRecs[$schemeName]
+        if (-not [string]::Equals($valStr, [string]$otherRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)) {
+            # User manually modified this scheme after the previous installation wrote it
+            break
+        }
+
+        $snap = [ordered]@{
+            keyExisted = $true
+            valExisted = [bool]$otherRec.existedBefore
+            value      = $otherRec.previousValue
+            kind       = if ([string]::IsNullOrWhiteSpace([string]$otherRec.previousKind)) { "String" } else { [string]$otherRec.previousKind }
+        }
+        if (-not $snap.valExisted -or [string]::IsNullOrWhiteSpace([string]$snap.value)) {
+            break
+        }
+    }
+    return $snap
+}
+
 function Start-BibataInstance([string]$exePath, [string]$workDir, [string]$extraArgs, [switch]$NoTaskScheduler) {
     $argTokens = New-Object System.Collections.Generic.List[string]
     if (-not [string]::IsNullOrWhiteSpace($extraArgs)) {
@@ -435,6 +529,7 @@ if ($prevManifest) {
         $previousCursorState = $prevManifest.previousCursorState
     }
 }
+Import-RuntimeSchemeRecords $InstallDir $managedSchemeRecords
 
 $roleMap = [ordered]@{
     Arrow       = "Pointer.cur"
@@ -792,10 +887,11 @@ try {
                 $managedSchemes.Add($schemeName)
             }
             if (-not $managedSchemeRecords.Contains($schemeName)) {
+                $inheritedSchemeSnap = Resolve-InheritedSchemeSnapshot $schemeName $schemeSnapBefore $InstallDir
                 $managedSchemeRecords[$schemeName] = [ordered]@{
-                    existedBefore = [bool]$schemeSnapBefore.valExisted
-                    previousValue = $schemeSnapBefore.value
-                    previousKind  = [string]$schemeSnapBefore.kind
+                    existedBefore = [bool]$inheritedSchemeSnap.valExisted
+                    previousValue = $inheritedSchemeSnap.value
+                    previousKind  = if ([string]::IsNullOrWhiteSpace([string]$inheritedSchemeSnap.kind)) { "String" } else { [string]$inheritedSchemeSnap.kind }
                     writtenValue  = $schemeValueStr
                 }
             }
