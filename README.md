@@ -18,11 +18,14 @@
   - **右键**：双层同心冰蓝波纹扩散，轻量区分左右键。
 - **按住拖拽柔光反馈**：按住左键拖拽窗口、框选文件或划选文本时亮起柔和微光环，松开即淡出（并通过实时按键状态校验确保绝不卡住）。
 - **双屏甩动定位指针**：短时间内快速左右甩动鼠标时，指针周围会亮起一圈清晰的冰蓝定位脉冲（日常移动与游戏不会误触发，双 2K 屏找指针更省心）。
+- **滚轮方向微光**：鼠标指针静止时滚动滚轮，指针上方（上滚）或下方（下滚）会亮起一道极细的方向微光弧，并自动合并高频滚动脉冲；可在 `config.ini` 中通过 `ScrollGlowEnabled=false` 单独关闭。
 - **无感后台静默运行 & 全局快捷键**：
   - **默认隐藏托盘图标**：纯后台静默运行，不在右下角系统托盘额外占用图标，保持任务栏整洁。
-  - **全局快捷键 `Ctrl + Alt + Shift + G`**：随时一键暂停 / 恢复所有光影特效（不与常见软件快捷键冲突，录屏、演示或游戏时随手切换）。
+  - **全局快捷键**：
+    - `Ctrl + Alt + Shift + G`：随时一键暂停 / 恢复所有光影特效（不与常见软件快捷键冲突，录屏、演示或游戏时随手切换）。
+    - `Ctrl + Alt + Shift + C`：一键循环切换配色（冰蓝 → 极光青 → 霜白 → 粉蓝幻梦 → 流光七彩），切换瞬间指针处轻闪新配色微光环预览并自动保存。
   - **全屏应用自动暂停**（仅在独占全屏 Direct3D 游戏时自动隐藏）& **开机自动启动**（安装时默认开启）。
-  - **可选托盘菜单 / 配置文件定制**：如需临时呼出托盘菜单切换预设、自定义颜色或单独开关某项特效，可在安装目录 `Bibata-Ice-Trail\config.ini` 中添加 `ShowTrayIcon=true` 后重启，或在启动程序时传入 `--show-tray` 参数；也可直接修改 `config.ini` 中的键值（常用键：`Enabled`、`TrailEnabled`、`ClickRippleEnabled`、`DragGlowEnabled`、`ShakeLocateEnabled`、`HotkeyEnabled`、`Preset`、`Palette`、`CustomColor`、`AutoPauseFullscreen`、`ShowTrayIcon`）。
+  - **可选托盘菜单 / 配置文件定制**：如需临时呼出托盘菜单切换预设、自定义颜色或单独开关某项特效，可在安装目录 `Bibata-Ice-Trail\config.ini` 中添加 `ShowTrayIcon=true` 后重启，或在启动程序时传入 `--show-tray` 参数；也可直接修改 `config.ini` 中的键值（常用键：`Enabled`、`TrailEnabled`、`ClickRippleEnabled`、`DragGlowEnabled`、`ShakeLocateEnabled`、`ScrollGlowEnabled`、`HotkeyEnabled`、`Preset`、`Palette`、`CustomColor`、`AutoPauseFullscreen`、`ShowTrayIcon`）。
   - **多款光影配色**：支持 `冰蓝 Ice`（`0`）、`极光青 Cyan`（`1`）、`霜白 Frost`（`2`）、**`粉蓝幻梦 PinkBlue`（`4`，樱花粉 ↔ 冰蓝动态双色渐变）**、**`流光七彩 Rainbow`（`5`，全光谱流动虹彩渐变）** 以及自定义纯色（`3` + `CustomColor`）。
   - 托盘菜单开启后支持：
     - 左键单击快速暂停 / 启用；右键独立开关各项特效
@@ -77,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 3. `install.ps1` 会自动完成：
    - 从 `ful1e5/Bibata_Cursor` 下载最新 `Bibata-*-Ice-Windows.zip` 并写入 `HKCU:\Control Panel\Cursors` 立即刷新生效；
    - 本地编译 `src/BibataIceTrail.cs` 为 `BibataIceTrail.exe` 并通过 `--self-test` 自检；
-   - 写入 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` 实现开机自动启动，并立即在桌面会话后台静默运行（默认不显示托盘图标，按 `Ctrl + Alt + Shift + G` 可全局开关，如需调整配置可编辑 `<InstallDir>\Bibata-Ice-Trail\config.ini` 或带 `--show-tray` 参数启动）。
+   - 写入 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` 实现开机自动启动，并立即在桌面会话后台静默运行（默认不显示托盘图标，按 `Ctrl + Alt + Shift + G` 可全局开关，按 `Ctrl + Alt + Shift + C` 可循环切换配色；如需关闭滚轮微光或微调参数，可编辑 `<InstallDir>\Bibata-Ice-Trail\config.ini` 中的 `ScrollGlowEnabled` 等键，或带 `--show-tray` 参数启动）。
 4. 验证完成标准：确认 `Get-Process -Name BibataIceTrail` 正在用户会话中运行（`Responding = True`），且 `HKCU:\Control Panel\Cursors` 指向已下载的 Bibata `.cur`/`.ani` 文件。
 
 ---
