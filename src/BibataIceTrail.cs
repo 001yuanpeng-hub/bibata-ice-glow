@@ -4505,21 +4505,55 @@ namespace BibataIceTrail
                     ClickRipple[] mmNear = new ClickRipple[2];
                     mmNear[0].X = 720; mmNear[0].Y = 300; mmNear[0].Ticks = nowTicks - (long)(100.0 * freq / 1000.0); mmNear[0].Kind = 0;
                     mmNear[1].X = 760; mmNear[1].Y = 330; mmNear[1].Ticks = nowTicks - (long)(30.0 * freq / 1000.0); mmNear[1].Kind = 0;
+
+                    ClickRipple[] mmNearOldOnly = new ClickRipple[1];
+                    mmNearOldOnly[0] = mmNear[0];
+                    int mnox, mnoy, mnow, mnoh;
+                    bool mmNearOldOnlyOk = renderer.RenderFrame(null, 0, false, mmNearOldOnly, 1, true, 760, 330, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mnox, out mnoy, out mnow, out mnoh);
+                    CapturedFrame frameOldOnly = mmNearOldOnlyOk ? CaptureRenderedFrame(renderer, mnox, mnoy, mnow, mnoh, ref alphaViolations) : null;
+
+                    ClickRipple[] mmNearNewOnly = new ClickRipple[1];
+                    mmNearNewOnly[0] = mmNear[1];
+                    int mnnx, mnny, mnnw, mnnh;
+                    bool mmNearNewOnlyOk = renderer.RenderFrame(null, 0, false, mmNearNewOnly, 1, true, 760, 330, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mnnx, out mnny, out mnnw, out mnnh);
+                    CapturedFrame frameNewOnly = mmNearNewOnlyOk ? CaptureRenderedFrame(renderer, mnnx, mnny, mnnw, mnnh, ref alphaViolations) : null;
+
                     int mnx, mny, mnw, mnh;
                     bool mmNearOk = renderer.RenderFrame(null, 0, false, mmNear, 2, true, 760, 330, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mnx, out mny, out mnw, out mnh);
-                    int mmNearOldPx = mmNearOk ? CountVisiblePixelsNear(renderer, mnx, mny, mnw, mnh, 720, 300, 64, ref alphaViolations) : 0;
-                    int mmNearNewPx = mmNearOk ? CountVisiblePixelsNear(renderer, mnx, mny, mnw, mnh, 760, 330, 64, ref alphaViolations) : 0;
+                    CapturedFrame frameBoth = mmNearOk ? CaptureRenderedFrame(renderer, mnx, mny, mnw, mnh, ref alphaViolations) : null;
+
+                    int mmNearOldDeltaPx = 0;
+                    int mmNearNewDeltaPx = 0;
+                    bool mmNearBothOk =
+                        frameOldOnly != null && frameNewOnly != null && frameBoth != null &&
+                        VerifyBothRipplesVisible(frameBoth, frameOldOnly, frameNewOnly, 80, out mmNearNewDeltaPx, out mmNearOldDeltaPx);
+
+                    int dropNewA = 0;
+                    int dropNewB = 0;
+                    bool dropNewRejected =
+                        frameOldOnly != null && frameNewOnly != null &&
+                        !VerifyBothRipplesVisible(frameOldOnly, frameOldOnly, frameNewOnly, 80, out dropNewA, out dropNewB) &&
+                        dropNewA == 0 && dropNewB >= 0;
+
+                    int dropOldA = 0;
+                    int dropOldB = 0;
+                    bool dropOldRejected =
+                        frameOldOnly != null && frameNewOnly != null &&
+                        !VerifyBothRipplesVisible(frameNewOnly, frameOldOnly, frameNewOnly, 80, out dropOldA, out dropOldB) &&
+                        dropOldB == 0 && dropOldA >= 0;
+
+                    bool mmNearDropCheck = dropNewRejected && dropOldRejected;
 
                     bool multiMonitorRippleOk =
                         mmLROk && mlrw <= 2560 && mlrh <= 1600 && mmLRNewPx >= 80 &&
                         mmRLOk && mrlw <= 2560 && mrlh <= 1600 && mmRLNewPx >= 80 &&
                         mmTBOk && mtbw <= 2560 && mtbh <= 1600 && mmTBNewPx >= 80 &&
                         mmBTOk && mbtw <= 2560 && mbth <= 1600 && mmBTNewPx >= 80 &&
-                        mmNearOk && mnw <= 2560 && mnh <= 1600 && mmNearOldPx >= 80 && mmNearNewPx >= 80;
+                        mmNearOk && mnw <= 2560 && mnh <= 1600 && mmNearBothOk && mmNearDropCheck;
 
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} missingAnchorOk={18} multiMonitorRippleOk={19} mmPx=({20},{21},{22},{23},{24}/{25}) cursorSizeLogicOk={26} silentDefaultOk={27} headerSize={28} alphaViolations={29} elapsedMs={30:F3} fullscreenBusy={31} ulwOk={32} ulwErr={33} ridOk={34} ridErr={35}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, missingAnchorOk, multiMonitorRippleOk, mmLRNewPx, mmRLNewPx, mmTBNewPx, mmBTNewPx, mmNearOldPx, mmNearNewPx, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} missingAnchorOk={18} multiMonitorRippleOk={19} mmPx=({20},{21},{22},{23}) mmNearDelta=({24}/{25}) mmNearDropCheck={26} cursorSizeLogicOk={27} silentDefaultOk={28} headerSize={29} alphaViolations={30} elapsedMs={31:F3} fullscreenBusy={32} ulwOk={33} ulwErr={34} ridOk={35} ridErr={36}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, missingAnchorOk, multiMonitorRippleOk, mmLRNewPx, mmRLNewPx, mmTBNewPx, mmBTNewPx, mmNearOldDeltaPx, mmNearNewDeltaPx, mmNearDropCheck, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
@@ -4584,6 +4618,93 @@ namespace BibataIceTrail
                 }
             }
             return count;
+        }
+
+        private sealed class CapturedFrame
+        {
+            public int X;
+            public int Y;
+            public int W;
+            public int H;
+            public uint[] Pixels;
+        }
+
+        private static unsafe CapturedFrame CaptureRenderedFrame(
+            TrailRenderer renderer,
+            int bx,
+            int by,
+            int bw,
+            int bh,
+            ref int alphaViolations)
+        {
+            if (renderer.DibBits == IntPtr.Zero || bw <= 0 || bh <= 0) return null;
+            CapturedFrame frame = new CapturedFrame();
+            frame.X = bx;
+            frame.Y = by;
+            frame.W = bw;
+            frame.H = bh;
+            frame.Pixels = new uint[bw * bh];
+
+            uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+            int stride = renderer.DibWidth;
+            for (int y = 0; y < bh; y++)
+            {
+                uint* row = dibBase + y * stride;
+                int dstRow = y * bw;
+                for (int x = 0; x < bw; x++)
+                {
+                    uint px = row[x];
+                    byte a = (byte)(px >> 24);
+                    byte r = (byte)((px >> 16) & 0xFF);
+                    byte g = (byte)((px >> 8) & 0xFF);
+                    byte b = (byte)(px & 0xFF);
+                    if (r > a || g > a || b > a) alphaViolations++;
+                    frame.Pixels[dstRow + x] = px;
+                }
+            }
+            return frame;
+        }
+
+        private static int CountDistinctVisiblePixels(CapturedFrame candidate, CapturedFrame baseline)
+        {
+            if (candidate == null || candidate.W <= 0 || candidate.H <= 0) return 0;
+            int count = 0;
+            for (int y = 0; y < candidate.H; y++)
+            {
+                int sy = candidate.Y + y;
+                int cRow = y * candidate.W;
+                bool inBaseY = (baseline != null && sy >= baseline.Y && sy < baseline.Y + baseline.H);
+                int bRow = inBaseY ? (sy - baseline.Y) * baseline.W : 0;
+                for (int x = 0; x < candidate.W; x++)
+                {
+                    uint cPx = candidate.Pixels[cRow + x];
+                    if ((cPx >> 24) == 0) continue;
+                    int sx = candidate.X + x;
+                    uint bPx = 0u;
+                    if (inBaseY && sx >= baseline.X && sx < baseline.X + baseline.W)
+                    {
+                        bPx = baseline.Pixels[bRow + (sx - baseline.X)];
+                    }
+                    if (cPx != bPx)
+                    {
+                        count++;
+                    }
+                }
+            }
+            return count;
+        }
+
+        private static bool VerifyBothRipplesVisible(
+            CapturedFrame combined,
+            CapturedFrame oldOnly,
+            CapturedFrame newOnly,
+            int minDistinctPixels,
+            out int newContribPx,
+            out int oldContribPx)
+        {
+            newContribPx = CountDistinctVisiblePixels(combined, oldOnly);
+            oldContribPx = CountDistinctVisiblePixels(combined, newOnly);
+            return newContribPx >= minDistinctPixels && oldContribPx >= minDistinctPixels;
         }
     }
 }
