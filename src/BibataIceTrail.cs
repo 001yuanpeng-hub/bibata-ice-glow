@@ -83,6 +83,7 @@ namespace BibataIceTrail
         public PaletteKind Palette;
         public string CustomColorHex;
         public bool AutoPauseFullscreen;
+        public bool ShowTrayIcon;
 
         private readonly string _path;
 
@@ -99,6 +100,7 @@ namespace BibataIceTrail
             Palette = PaletteKind.Ice;
             CustomColorHex = "#A78BFA";
             AutoPauseFullscreen = true;
+            ShowTrayIcon = false;
         }
 
         public void Load()
@@ -174,6 +176,11 @@ namespace BibataIceTrail
                         bool a;
                         if (bool.TryParse(val, out a)) AutoPauseFullscreen = a;
                     }
+                    else if (string.Equals(key, "ShowTrayIcon", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool st;
+                        if (bool.TryParse(val, out st)) ShowTrayIcon = st;
+                    }
                 }
             }
             catch
@@ -202,6 +209,7 @@ namespace BibataIceTrail
                 sb.AppendLine("Palette=" + ((int)Palette).ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("CustomColor=" + CustomColorHex);
                 sb.AppendLine("AutoPauseFullscreen=" + (AutoPauseFullscreen ? "true" : "false"));
+                sb.AppendLine("ShowTrayIcon=" + (ShowTrayIcon ? "true" : "false"));
                 File.WriteAllText(_path, sb.ToString(), Encoding.UTF8);
             }
             catch
@@ -2496,7 +2504,7 @@ namespace BibataIceTrail
         private ToolStripMenuItem _itemHotkeyEnabled;
         private ToolStripMenuItem _itemAutoStart;
 
-        public TrayApplicationContext(AppConfig config)
+        public TrayApplicationContext(AppConfig config, bool showTrayIcon)
         {
             _config = config;
             _buffer = new SampleRingBuffer(512);
@@ -2507,14 +2515,17 @@ namespace BibataIceTrail
             _inputSink = new RawInputMessageWindow(_buffer, _ripples, _interaction, _engine, new Action(ToggleEnabled));
             _inputSink.SetTrackingOptions(_config.ShakeLocateEnabled, _config.DragGlowEnabled, _config.HotkeyEnabled);
 
-            _activeIcon = CreateTrayIcon(true);
-            _pausedIcon = CreateTrayIcon(false);
+            if (showTrayIcon)
+            {
+                _activeIcon = CreateTrayIcon(true);
+                _pausedIcon = CreateTrayIcon(false);
 
-            _notifyIcon = new NotifyIcon();
-            _notifyIcon.ContextMenuStrip = BuildMenu();
-            _notifyIcon.MouseClick += OnTrayMouseClick;
-            SyncMenuAndIcon();
-            _notifyIcon.Visible = true;
+                _notifyIcon = new NotifyIcon();
+                _notifyIcon.ContextMenuStrip = BuildMenu();
+                _notifyIcon.MouseClick += OnTrayMouseClick;
+                SyncMenuAndIcon();
+                _notifyIcon.Visible = true;
+            }
         }
 
         private ContextMenuStrip BuildMenu()
@@ -2756,6 +2767,7 @@ namespace BibataIceTrail
 
         private void SyncMenuAndIcon()
         {
+            if (_notifyIcon == null) return;
             _itemEnabled.Checked = _config.Enabled;
             _itemTrailEnabled.Checked = _config.TrailEnabled;
             _itemClickEnabled.Checked = _config.ClickRippleEnabled;
@@ -2783,12 +2795,15 @@ namespace BibataIceTrail
 
         private void ExitApp()
         {
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.Visible = false;
+                _notifyIcon.Dispose();
+            }
             _inputSink.Dispose();
             _engine.Dispose();
-            _activeIcon.Dispose();
-            _pausedIcon.Dispose();
+            if (_activeIcon != null) _activeIcon.Dispose();
+            if (_pausedIcon != null) _pausedIcon.Dispose();
             ExitThread();
         }
 
@@ -2883,6 +2898,19 @@ namespace BibataIceTrail
                     return 0;
                 }
 
+                bool forceShowTray = false;
+                if (args != null)
+                {
+                    for (int i = 0; i < args.Length; i++)
+                    {
+                        if (string.Equals(args[i], "--show-tray", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(args[i], "--tray", StringComparison.OrdinalIgnoreCase))
+                        {
+                            forceShowTray = true;
+                        }
+                    }
+                }
+
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
@@ -2891,7 +2919,7 @@ namespace BibataIceTrail
                 AppConfig config = new AppConfig(cfgPath);
                 config.Load();
 
-                TrayApplicationContext ctx = new TrayApplicationContext(config);
+                TrayApplicationContext ctx = new TrayApplicationContext(config, config.ShowTrayIcon || forceShowTray);
                 Application.Run(ctx);
                 GC.KeepAlive(mutex);
                 return 0;
@@ -3114,16 +3142,19 @@ namespace BibataIceTrail
                         if (msgWin.Handle != IntPtr.Zero) msgWin.DestroyHandle();
                     }
 
+                    AppConfig defaultCfg = new AppConfig(string.Empty);
+                    bool silentDefaultOk = (!defaultCfg.ShowTrayIcon && defaultCfg.HotkeyEnabled);
+
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} headerSize={13} alphaViolations={14} elapsedMs={15:F3} fullscreenBusy={16} ulwOk={17} ulwErr={18} ridOk={19} ridErr={20}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} silentDefaultOk={13} headerSize={14} alphaViolations={15} elapsedMs={16:F3} fullscreenBusy={17} ulwOk={18} ulwErr={19} ridOk={20} ridErr={21}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
                     {
                         return 1;
                     }

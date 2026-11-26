@@ -203,7 +203,7 @@ if (-not $SkipTrail) {
         if (-not $launched) {
             Start-Process -FilePath $destExe -WorkingDirectory $trailDir
         }
-        Write-Host "BibataIceTrail is running in your system tray." -ForegroundColor Green
+        Write-Host "BibataIceTrail is running silently in the background (toggle with Ctrl+Alt+Shift+G)." -ForegroundColor Green
     }
 }
 
