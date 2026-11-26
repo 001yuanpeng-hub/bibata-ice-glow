@@ -380,6 +380,35 @@ function Test-AllSchemePathsUnderDir([string]$schemeVal, [string]$dirRoot) {
     return ($nonEmptyCount -gt 0)
 }
 
+function Get-RetainedSchemeFiles([string]$schemesPath, $schemeRecords, $previousState, $roleMap) {
+    $values = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $schemesPath) {
+        $schemes = Get-Item -LiteralPath $schemesPath
+        foreach ($name in $schemes.GetValueNames()) {
+            if ($name) {
+                $raw = $schemes.GetValue($name, "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $values.Add([string]$raw)
+            }
+        }
+    }
+    # A later uninstall may restore these values even when their schemes are inactive.
+    foreach ($record in $schemeRecords.Values) {
+        if ($record.existedBefore) { $values.Add([string]$record.previousValue) }
+    }
+    foreach ($role in $roleMap.Keys) {
+        $values.Add([string]$previousState.roles.$role)
+    }
+
+    $files = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($value in $values) {
+        foreach ($part in ($value -split ',')) {
+            $path = [Environment]::ExpandEnvironmentVariables($part.Trim().Trim('"'))
+            if ($path) { [void]$files.Add((Normalize-BibataPath $path)) }
+        }
+    }
+    return ,$files
+}
+
 function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
     if ([string]::IsNullOrWhiteSpace($installRoot) -or $null -eq $targetMap) { return }
     $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
@@ -812,9 +841,11 @@ try {
     $exeExistedBefore = $false
     $csExistedBefore = $false
     $cfgExistedBefore = $false
-    $exeBak = "$destExe.bak"
-    $csBak = "$destCs.bak"
-    $cfgBak = "$cfgPath.bak"
+    # Outside the install directory so user backups survive both upgrade and rollback.
+    $backupPrefix = Join-Path $env:TEMP ("bibata-trail-rollback-" + [Guid]::NewGuid().ToString("N"))
+    $exeBak = "$backupPrefix.exe.bak"
+    $csBak = "$backupPrefix.cs.bak"
+    $cfgBak = "$backupPrefix.ini.bak"
     $runKey = Join-Path $RegistryRoot "Software\Microsoft\Windows\CurrentVersion\Run"
     $runSnapBefore = $null
     $runningProcs = @()
@@ -954,47 +985,9 @@ try {
                     if (-not [string]::IsNullOrEmpty($nm)) { $managedDirNormSet.Add($nm) | Out-Null }
                 }
 
-                foreach ($extraSz in @("Regular", "Large", "Extra-Large")) {
-                    if ($extraSz -eq $Size) { continue }
+                $extraSizes = @("Regular", "Large", "Extra-Large") | Where-Object { $_ -ne $Size }
+                foreach ($extraSz in $extraSizes) {
                     $extraSizeDir = Join-Path $themeRoot "$themeName-$extraSz-Windows"
-                    $extraDirNorm = Normalize-BibataPath $extraSizeDir
-                    $extraPrefix = $extraDirNorm + "\"
-
-                    foreach ($mf in @($managedCursorFiles)) {
-                        $normMf = Normalize-BibataPath ([string]$mf)
-                        if (-not $normMf.StartsWith($extraPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
-                        if (Test-Path -LiteralPath $mf -PathType Leaf) {
-                            if (-not $createdCursorNormSet.Contains($normMf) -and -not $backedUpCursorNormSet.Contains($normMf)) {
-                                if ([string]::IsNullOrWhiteSpace($cursorBackupDir)) {
-                                    $cursorBackupDir = Join-Path $env:TEMP ("bibata_cursor_bak_" + [Guid]::NewGuid().ToString("N"))
-                                    New-Item -ItemType Directory -Path $cursorBackupDir -Force | Out-Null
-                                }
-                                $bakFile = Join-Path $cursorBackupDir ("bak_" + $overwrittenCursorBackups.Count + ".bin")
-                                $origHash = Get-FileSha256 $mf
-                                [System.IO.File]::Copy($mf, $bakFile, $true)
-                                $overwrittenCursorBackups.Add([pscustomobject]@{
-                                    Target = $mf
-                                    Backup = $bakFile
-                                    Hash   = $origHash
-                                })
-                                $backedUpCursorNormSet.Add($normMf) | Out-Null
-                            }
-                            Remove-Item -LiteralPath $mf -Force -ErrorAction Stop
-                        }
-                        Remove-PathFromList $managedCursorFiles $mf
-                    }
-
-                    if ($managedDirNormSet.Contains($extraDirNorm) -and (Test-Path -LiteralPath $extraSizeDir -PathType Container)) {
-                        $remExtra = @(Get-ChildItem -LiteralPath $extraSizeDir -Force -ErrorAction SilentlyContinue)
-                        if ($remExtra.Count -eq 0) {
-                            Remove-Item -LiteralPath $extraSizeDir -Force -ErrorAction SilentlyContinue
-                            Remove-PathFromList $managedCursorDirs $extraSizeDir
-                        }
-                        else {
-                            Write-Host "Preserving non-empty extra size folder with user files: $extraSizeDir" -ForegroundColor Yellow
-                        }
-                    }
-
                     $extraSchemeName = "$themeName ($extraSz)"
                     if (Test-Path $schemesKey) {
                         $extraSchemeSnap = Snapshot-RegValue $schemesKey $extraSchemeName
@@ -1029,6 +1022,49 @@ try {
                                 }
                                 $prunedSchemeNames.Add($extraSchemeName)
                             }
+                        }
+                    }
+                }
+
+                $referencedFiles = Get-RetainedSchemeFiles $schemesKey $managedSchemeRecords $previousCursorState $roleMap
+                foreach ($extraSz in $extraSizes) {
+                    $extraSizeDir = Join-Path $themeRoot "$themeName-$extraSz-Windows"
+                    $extraDirNorm = Normalize-BibataPath $extraSizeDir
+                    $extraPrefix = $extraDirNorm + "\"
+
+                    foreach ($mf in @($managedCursorFiles)) {
+                        $normMf = Normalize-BibataPath ([string]$mf)
+                        if (-not $normMf.StartsWith($extraPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                        if ($referencedFiles.Contains($normMf)) { continue }
+                        if (Test-Path -LiteralPath $mf -PathType Leaf) {
+                            if (-not $createdCursorNormSet.Contains($normMf) -and -not $backedUpCursorNormSet.Contains($normMf)) {
+                                if ([string]::IsNullOrWhiteSpace($cursorBackupDir)) {
+                                    $cursorBackupDir = Join-Path $env:TEMP ("bibata_cursor_bak_" + [Guid]::NewGuid().ToString("N"))
+                                    New-Item -ItemType Directory -Path $cursorBackupDir -Force | Out-Null
+                                }
+                                $bakFile = Join-Path $cursorBackupDir ("bak_" + $overwrittenCursorBackups.Count + ".bin")
+                                $origHash = Get-FileSha256 $mf
+                                [System.IO.File]::Copy($mf, $bakFile, $true)
+                                $overwrittenCursorBackups.Add([pscustomobject]@{
+                                    Target = $mf
+                                    Backup = $bakFile
+                                    Hash   = $origHash
+                                })
+                                $backedUpCursorNormSet.Add($normMf) | Out-Null
+                            }
+                            Remove-Item -LiteralPath $mf -Force -ErrorAction Stop
+                        }
+                        Remove-PathFromList $managedCursorFiles $mf
+                    }
+
+                    if ($managedDirNormSet.Contains($extraDirNorm) -and (Test-Path -LiteralPath $extraSizeDir -PathType Container)) {
+                        $remExtra = @(Get-ChildItem -LiteralPath $extraSizeDir -Force -ErrorAction SilentlyContinue)
+                        if ($remExtra.Count -eq 0) {
+                            Remove-Item -LiteralPath $extraSizeDir -Force -ErrorAction SilentlyContinue
+                            Remove-PathFromList $managedCursorDirs $extraSizeDir
+                        }
+                        else {
+                            Write-Host "Preserving non-empty extra size folder with user files: $extraSizeDir" -ForegroundColor Yellow
                         }
                     }
                 }
@@ -1096,9 +1132,9 @@ try {
                 New-Item -ItemType Directory -Path $trailDir -Force | Out-Null
             }
 
-            if ($exeExistedBefore) { [System.IO.File]::Copy($destExe, $exeBak, $true) }
-            if ($csExistedBefore) { [System.IO.File]::Copy($destCs, $csBak, $true) }
-            if ($cfgExistedBefore) { [System.IO.File]::Copy($cfgPath, $cfgBak, $true) }
+            if ($exeExistedBefore) { Write-FileFreshInode $destExe $exeBak }
+            if ($csExistedBefore) { Write-FileFreshInode $destCs $csBak }
+            if ($cfgExistedBefore) { Write-FileFreshInode $cfgPath $cfgBak }
 
             if ($wasRunning) {
                 foreach ($rp in $runningProcs) {
@@ -1164,9 +1200,8 @@ try {
             $prevTrailExePath = $destExe
             Add-UniquePath $managedTrailFiles $destExe
             Add-UniquePath $managedTrailFiles $destCs
-            if ($cfgModified -or (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
-                Add-UniquePath $managedTrailFiles $cfgPath
-            }
+            # The running app can create config.ini after a -NoLaunch install.
+            Add-UniquePath $managedTrailFiles $cfgPath
         }
 
         $manifestObj = [ordered]@{

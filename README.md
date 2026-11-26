@@ -59,7 +59,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Palette Rainbow
 # 如果已经装过指针，只安装流光与点击波纹
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipCursor
 
-# 极简磁盘模式：仅保留当前选中的指针尺寸（不保留其余尺寸用于 S 键切换）
+# 极简磁盘模式：安装选中尺寸，清理其他尺寸中未被保留方案引用的指针文件
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -SingleSize
 ```
 

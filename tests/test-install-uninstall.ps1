@@ -214,6 +214,8 @@ try {
 
     $exe3HashBefore = Get-FileSha256 $exe3
     $cfg3HashBefore = Get-FileSha256 $cfg3
+    [IO.File]::WriteAllText("$cfg3.bak", "user backup from before the upgrade")
+    $cfg3BackupHash = Get-FileSha256 "$cfg3.bak"
     $pids3Before = @(Get-BibataPidsByPath $exe3)
     Assert-True ($pids3Before.Count -eq 1) "Case 3a: Initial instance not running"
 
@@ -240,7 +242,7 @@ class FailLaunch {
     Assert-True ((Get-FileSha256 $cfg3) -eq $cfg3HashBefore) "Case 3a: config.ini hash mismatch after rollback!"
     Assert-True ((Get-Content -LiteralPath $cfg3 -Raw) -match "Palette=0") "Case 3a: config.ini not rolled back to Palette=0!"
     Assert-True (-not (Test-Path -LiteralPath "$exe3.bak")) "Case 3a: exe.bak not cleaned after verified rollback"
-    Assert-True (-not (Test-Path -LiteralPath "$cfg3.bak")) "Case 3a: config.ini.bak not cleaned after verified rollback"
+    Assert-True ((Get-FileSha256 "$cfg3.bak") -eq $cfg3BackupHash) "Case 3a: Rollback overwrote the user's config.ini.bak"
     Assert-True ($null -eq (Get-ItemProperty -Path $run3 -Name "BibataIceTrail" -ErrorAction SilentlyContinue)) "Case 3a: Newly added Run entry not removed on rollback!"
     $pids3After = @(Get-BibataPidsByPath $exe3)
     Assert-True ($pids3After.Count -eq 1) "Case 3a: Old BibataIceTrail process not restarted after rollback!"
@@ -1234,6 +1236,11 @@ class FailLaunch {
     [System.IO.File]::WriteAllText($subBackup21, $subBackupContent21, [System.Text.Encoding]::UTF8)
     $rootHash21 = Get-FileSha256 $rootBackup21
     $subHash21 = Get-FileSha256 $subBackup21
+    $configBackup21 = Join-Path $trailDir21 "config.ini.bak"
+    [IO.File]::WriteAllText($configBackup21, "personal backup, different from the live configuration")
+    $configBackupHash21 = Get-FileSha256 $configBackup21
+    & $installPs1 -InstallDir $d21 -SkipCursor -Palette Rainbow -NoLaunch -RegistryRoot $r21 -SkipCursorRefresh -SkipTaskScheduler | Out-Null
+    Assert-True ((Get-FileSha256 $configBackup21) -eq $configBackupHash21) "Case 21: Reinstall changed config.ini.bak"
 
     & $uninstallPs1 -InstallDir $d21 -RegistryRoot $r21 -SkipCursorRefresh | Out-Null
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "BibataIceTrail.exe"))) "Case 21: BibataIceTrail.exe was not removed!"
@@ -1245,8 +1252,72 @@ class FailLaunch {
     Assert-True ((Get-FileSha256 $rootBackup21) -eq $rootHash21) "Case 21: my-palette-backup.ini content changed!"
     Assert-True (([System.IO.File]::ReadAllText($rootBackup21, [System.Text.Encoding]::UTF8)) -eq $rootBackupContent21) "Case 21: my-palette-backup.ini text mismatch!"
     Assert-True ((Get-FileSha256 $subBackup21) -eq $subHash21) "Case 21: nested-backup.ini content changed!"
+    Assert-True ((Get-FileSha256 $configBackup21) -eq $configBackupHash21) "Case 21: Uninstall changed config.ini.bak"
     Assert-True (([System.IO.File]::ReadAllText($subBackup21, [System.Text.Encoding]::UTF8)) -eq $subBackupContent21) "Case 21: nested-backup.ini text mismatch!"
     Write-Host "PASS Case 21: Normal uninstall cleans project trail files while preserving user root & nested files in Bibata-Ice-Trail" -ForegroundColor Green
+
+    # Case 22: prune only unreferenced files, even when both saved schemes are inactive.
+    $d22 = Join-Path $testRoot "case22_prune_references"
+    $r22 = Join-Path $regRoot "case22"
+    $s22 = Join-Path $r22 "Control Panel\Cursors\Schemes"
+    $install22 = @{ InstallDir = $d22; RegistryRoot = $r22; SkipTrail = $true; SkipCursorRefresh = $true; TestCursorZipPath = $fixtureZip }
+    & $installPs1 @install22 -Size Large | Out-Null
+    $largeDir22 = Join-Path $d22 "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows"
+    $largeArrow22 = Join-Path $largeDir22 "Pointer.cur"
+    $largeHash22 = Get-FileSha256 $largeArrow22
+    $xlDir22 = Join-Path $d22 "Bibata-Modern-Ice\Bibata-Modern-Ice-Extra-Large-Windows"
+    $xlHelp22 = Join-Path $xlDir22 "Help.cur"
+    $xlHash22 = Get-FileSha256 $xlHelp22
+    $mixed22 = "$largeArrow22,$xlHelp22"
+    Set-ItemProperty -Path $s22 -Name "My mixed sizes" -Value $mixed22 -Type String
+    $expanded22 = $largeArrow22.Replace($env:TEMP, "%TEMP%")
+    Set-ItemProperty -Path $s22 -Name "My other arrow" -Value $expanded22 -Type ExpandString
+
+    & $installPs1 @install22 -Size Regular -SingleSize | Out-Null
+    Assert-True ((Get-Item $s22).GetValue("My mixed sizes") -eq $mixed22) "Case 22: Saved mixed scheme changed"
+    Assert-True ((Get-FileSha256 $largeArrow22) -eq $largeHash22) "Case 22: Saved Large arrow changed"
+    Assert-True ((Get-FileSha256 $xlHelp22) -eq $xlHash22) "Case 22: Saved Extra-Large Help changed"
+    Assert-True (-not (Test-Path (Join-Path $largeDir22 "Help.cur"))) "Case 22: Unreferenced Large Help was not pruned"
+    Remove-ItemProperty -Path $s22 -Name "My mixed sizes"
+    & $installPs1 @install22 -Size Regular -SingleSize | Out-Null
+    Assert-True ((Get-FileSha256 $largeArrow22) -eq $largeHash22) "Case 22: ExpandString reference was lost"
+    Assert-True (-not (Test-Path $xlDir22)) "Case 22: Extra-Large was kept after its last reference disappeared"
+    Remove-ItemProperty -Path $s22 -Name "My other arrow"
+    & $uninstallPs1 -InstallDir $d22 -RegistryRoot $r22 -SkipCursorRefresh | Out-Null
+    Assert-True (-not (Test-Path $largeDir22)) "Case 22: Previously retained file was missing from uninstall ownership"
+    Write-Host "PASS Case 22: SingleSize preserves saved references across sizes and cleans up after the last reference disappears" -ForegroundColor Green
+
+    # Case 23: a locked manifest must prevent the CLI from reporting a successful uninstall.
+    $d23 = Join-Path $testRoot "case23_locked_manifest"
+    $r23 = Join-Path $regRoot "case23"
+    & $installPs1 -InstallDir $d23 -RegistryRoot $r23 -SingleSize -SkipTrail -SkipCursorRefresh -TestCursorZipPath $fixtureZip | Out-Null
+    $manifest23 = Join-Path $d23 "bibata-ice-glow-manifest.json"
+    $cursorKey23 = Join-Path $r23 "Control Panel\Cursors"
+    $arrow23 = (Get-Item $cursorKey23).GetValue("Arrow")
+    $exclusive23 = [IO.File]::Open($manifest23, 'Open', 'Read', 'None')
+    try {
+        $readFailed23 = $false
+        try { & $uninstallPs1 -InstallDir $d23 -RegistryRoot $r23 -SkipCursorRefresh | Out-Null }
+        catch { $readFailed23 = $true }
+    }
+    finally { $exclusive23.Dispose() }
+    Assert-True ($readFailed23 -and (Test-Path -LiteralPath $arrow23)) "Case 23: Unreadable manifest allowed cleanup"
+    Assert-True ((Get-Item $cursorKey23).GetValue("Arrow") -eq $arrow23) "Case 23: Unreadable manifest changed active cursors"
+    $args23 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $uninstallPs1), '-InstallDir', ('"{0}"' -f $d23), '-RegistryRoot', $r23, '-SkipCursorRefresh')
+    $out23 = Join-Path $testRoot "case23-out.txt"
+    $err23 = Join-Path $testRoot "case23-err.txt"
+    $lock23 = [IO.File]::Open($manifest23, 'Open', 'Read', 'Read')
+    try {
+        $first23 = Start-Process powershell.exe -ArgumentList $args23 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out23 -RedirectStandardError $err23
+    }
+    finally { $lock23.Dispose() }
+    Assert-True ($first23.ExitCode -ne 0) "Case 23: Locked manifest returned success"
+    Assert-True (-not ([IO.File]::ReadAllText($out23).Contains("Uninstall complete."))) "Case 23: False completion message"
+    Assert-True (([IO.File]::ReadAllText($err23) -replace '\s','') -like '*bibata-ice-glow-manifest.json*') "Case 23: Error did not name the manifest"
+    Assert-True (Test-Path -LiteralPath $manifest23 -PathType Leaf) "Case 23: Retry manifest missing"
+    $retry23 = Start-Process powershell.exe -ArgumentList $args23 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out23 -RedirectStandardError $err23
+    Assert-True ($retry23.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $manifest23)) "Case 23: Retry failed to remove released manifest"
+    Write-Host "PASS Case 23: Locked manifest returns failure and retry removes it" -ForegroundColor Green
 
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched

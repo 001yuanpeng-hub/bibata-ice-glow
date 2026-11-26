@@ -334,8 +334,10 @@ $InstallDir = Resolve-BibataAbsolutePath $InstallDir
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
 $manifest = $null
 if (Test-Path -LiteralPath $manifestPath) {
+    # An unreadable manifest may still own active files and registry values.
+    $manifestJson = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 -ErrorAction Stop
     try {
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $manifest = $manifestJson | ConvertFrom-Json
     }
     catch {
         $manifest = $null
@@ -778,48 +780,21 @@ else {
 # 3. Clean up managed trail files and manifest
 if (-not $KeepFiles) {
     if ($shouldManageTrail -and (Test-Path -LiteralPath $trailDir -PathType Container)) {
-        $trailTargetFiles = New-Object System.Collections.Generic.List[string]
-        $trailTargetNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-
-        if ($manifest -and $manifest.managedTrailFiles) {
-            foreach ($mtf in @($manifest.managedTrailFiles)) {
-                $mtfStr = [string]$mtf
-                if ([string]::IsNullOrWhiteSpace($mtfStr)) { continue }
-                if ((Test-PathUnderAny $mtfStr @($trailDir)) -or ((Normalize-BibataPath $mtfStr) -eq (Normalize-BibataPath $trailExe))) {
-                    $mtfNorm = Normalize-BibataPath $mtfStr
-                    if (-not [string]::IsNullOrEmpty($mtfNorm) -and $trailTargetNormSet.Add($mtfNorm)) {
-                        $trailTargetFiles.Add($mtfStr)
-                    }
-                }
-            }
+        if ($manifest -and $manifest.PSObject.Properties['managedTrailFiles']) {
+            $trailTargetFiles = @($manifest.managedTrailFiles)
         }
-
-        $knownTrailNames = @(
-            "BibataIceTrail.exe",
-            "BibataIceTrail.cs",
-            "config.ini",
-            "BibataIceTrail.exe.bak",
-            "BibataIceTrail.cs.bak",
-            "config.ini.bak",
-            "BibataIceTrail.candidate.exe",
-            "bibata_ice_trail_selftest.log",
-            "bibata-runtime-schemes.json"
-        )
-        $knownTrailCandidates = New-Object System.Collections.Generic.List[string]
-        if (-not [string]::IsNullOrWhiteSpace($trailExe) -and (Test-PathUnderAny $trailExe @($trailDir))) {
-            $knownTrailCandidates.Add($trailExe)
-        }
-        foreach ($ktn in $knownTrailNames) {
-            $knownTrailCandidates.Add((Join-Path $trailDir $ktn))
-        }
-        foreach ($ktc in $knownTrailCandidates) {
-            $ktcNorm = Normalize-BibataPath $ktc
-            if (-not [string]::IsNullOrEmpty($ktcNorm) -and $trailTargetNormSet.Add($ktcNorm)) {
-                $trailTargetFiles.Add($ktc)
-            }
+        else {
+            # Older installations have no file list. Only the installed program,
+            # source and live configuration have unambiguous names.
+            $trailTargetFiles = @(
+                $trailExe
+                (Join-Path $trailDir "BibataIceTrail.cs")
+                (Join-Path $trailDir "config.ini")
+            )
         }
 
         foreach ($tfPath in $trailTargetFiles) {
+            if (-not (Test-PathUnderAny $tfPath @($trailDir))) { continue }
             if (Test-Path -LiteralPath $tfPath -PathType Leaf) {
                 if (-not (Try-RemoveFileStrict $tfPath $failedDeletions)) {
                     $remainingManagedTrailFiles.Add($tfPath)
@@ -890,8 +865,8 @@ if (-not $KeepFiles) {
         throw "Uninstall incomplete: failed to delete $($failedDeletions.Count) file(s)/folder(s): $($failedListMsg -join '; '). Manifest retained for retry after releasing handles."
     }
 
-    if (Test-Path -LiteralPath $manifestPath) {
-        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+    if (-not (Try-RemoveFileStrict $manifestPath $failedDeletions)) {
+        throw "Uninstall incomplete: could not remove '$manifestPath'. $($failedDeletions[0].Reason) Release the file and retry."
     }
     if (Test-Path -LiteralPath $InstallDir) {
         $remaining = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
