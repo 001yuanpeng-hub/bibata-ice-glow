@@ -384,7 +384,12 @@ namespace BibataIceTrail
         public const uint MOD_SHIFT = 0x0004;
         public const uint MOD_NOREPEAT = 0x4000;
         public const uint VK_C = 0x43;
+        public const uint VK_D = 0x44;
         public const uint VK_G = 0x47;
+        public const uint VK_S = 0x53;
+
+        public const uint SPI_SETCURSORS = 0x0057;
+        public const uint SPIF_SENDCHANGE = 0x0002;
 
         public const int HTTRANSPARENT = -1;
         public const int MA_NOACTIVATE = 3;
@@ -652,6 +657,9 @@ namespace BibataIceTrail
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
 
         public static void EnablePerMonitorDpi()
         {
@@ -1419,7 +1427,7 @@ namespace BibataIceTrail
             bool hasPreview = (previewProgress >= 0.0f && previewProgress < 1.0f);
             if (hasPreview)
             {
-                float prevReach = 36.0f * scale;
+                float prevReach = (12.0f + preset.RippleMaxRadius * 0.65f + preset.HaloRadius * 0.65f) * scale;
                 float px = (float)cursorX;
                 float py = (float)cursorY;
                 if (px - prevReach < bMinX) bMinX = px - prevReach;
@@ -1468,7 +1476,7 @@ namespace BibataIceTrail
             }
             if (hasPreview)
             {
-                AccumulatePalettePreview(outX, outY, outW, outH, cursorX, cursorY, previewProgress, scale, trackColor);
+                AccumulatePalettePreview(outX, outY, outW, outH, cursorX, cursorY, previewProgress, scale, preset, trackColor);
             }
             float timeSec = (float)((double)(nowTicks % (Stopwatch.Frequency * 3600L)) / (double)Stopwatch.Frequency);
             int nonZero = CompositePremultiplied(outW, outH, preset, palette, timeSec);
@@ -2187,13 +2195,16 @@ namespace BibataIceTrail
             int cursorY,
             float progress,
             float scale,
+            TrailPreset preset,
             bool trackColor)
         {
             float inv = 1.0f - progress;
             float ease = 1.0f - inv * inv * inv;
-            float rRing = (9.0f + 17.0f * ease) * scale;
-            float ringHaloW = 7.5f * scale;
-            float ringCoreW = 2.0f * scale;
+            float rScale = preset.RippleMaxRadius / 30.0f;
+            float wScale = preset.HaloRadius / 14.0f;
+            float rRing = (9.0f + 17.0f * rScale * ease) * scale;
+            float ringHaloW = 7.5f * wScale * scale;
+            float ringCoreW = 2.0f * wScale * scale;
             float fade = inv * inv;
             if (fade <= 0.005f) return;
 
@@ -2778,10 +2789,176 @@ namespace BibataIceTrail
         }
     }
 
+    internal static class CursorSizeManager
+    {
+        private static readonly string[] RoleNames = new string[]
+        {
+            "Arrow", "Help", "AppStarting", "Wait", "Crosshair", "IBeam",
+            "NWPen", "No", "SizeNS", "SizeWE", "SizeNWSE", "SizeNESW",
+            "SizeAll", "UpArrow", "Hand", "Pin", "Person"
+        };
+
+        private static readonly string[] RoleFiles = new string[]
+        {
+            "Pointer.cur", "Help.cur", "Work.ani", "Busy.ani", "Cross.cur", "Text.cur",
+            "Handwriting.cur", "Unavailable.cur", "Vert.cur", "Horz.cur", "Dgn1.cur", "Dgn2.cur",
+            "Move.cur", "Alternate.cur", "Link.cur", "Pin.cur", "Person.cur"
+        };
+
+        private static readonly string[] SizeOrder = new string[] { "Regular", "Large", "Extra-Large" };
+
+        public static string ParseSizeFromFolderName(string folderName)
+        {
+            if (string.IsNullOrEmpty(folderName)) return null;
+            if (folderName.EndsWith("-Extra-Large-Windows", StringComparison.OrdinalIgnoreCase)) return "Extra-Large";
+            if (folderName.EndsWith("-Large-Windows", StringComparison.OrdinalIgnoreCase)) return "Large";
+            if (folderName.EndsWith("-Regular-Windows", StringComparison.OrdinalIgnoreCase)) return "Regular";
+            return null;
+        }
+
+        public static string GetNextSize(string currentSize)
+        {
+            if (string.Equals(currentSize, "Regular", StringComparison.OrdinalIgnoreCase)) return "Large";
+            if (string.Equals(currentSize, "Large", StringComparison.OrdinalIgnoreCase)) return "Extra-Large";
+            return "Regular";
+        }
+
+        private static bool HasAllCursorFiles(string sizeDir)
+        {
+            if (string.IsNullOrEmpty(sizeDir) || !Directory.Exists(sizeDir)) return false;
+            for (int i = 0; i < RoleFiles.Length; i++)
+            {
+                if (!File.Exists(Path.Combine(sizeDir, RoleFiles[i]))) return false;
+            }
+            return true;
+        }
+
+        private static string ExtractThemeName(string folderName, string size)
+        {
+            string suffix = "-" + size + "-Windows";
+            if (folderName.Length <= suffix.Length) return null;
+            return folderName.Substring(0, folderName.Length - suffix.Length);
+        }
+
+        public static bool CycleInstalledCursorSize(string exePath)
+        {
+            try
+            {
+                string themeRoot = null;
+                string themeName = null;
+                string currentSize = "Regular";
+
+                using (RegistryKey cursorsKey = Registry.CurrentUser.OpenSubKey(@"Control Panel\Cursors", false))
+                {
+                    if (cursorsKey != null)
+                    {
+                        string arrowPath = cursorsKey.GetValue("Arrow") as string;
+                        if (!string.IsNullOrEmpty(arrowPath))
+                        {
+                            string curSizeDir = Path.GetDirectoryName(arrowPath);
+                            if (!string.IsNullOrEmpty(curSizeDir))
+                            {
+                                string dirName = Path.GetFileName(curSizeDir);
+                                string parsedSize = ParseSizeFromFolderName(dirName);
+                                if (parsedSize != null && dirName.StartsWith("Bibata-", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    themeName = ExtractThemeName(dirName, parsedSize);
+                                    themeRoot = Path.GetDirectoryName(curSizeDir);
+                                    currentSize = parsedSize;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(themeRoot) || string.IsNullOrEmpty(themeName))
+                {
+                    string exeDir = Path.GetDirectoryName(exePath);
+                    string installRoot = string.IsNullOrEmpty(exeDir) ? null : Path.GetDirectoryName(exeDir);
+                    if (!string.IsNullOrEmpty(installRoot))
+                    {
+                        string modernRoot = Path.Combine(installRoot, "Bibata-Modern-Ice");
+                        string origRoot = Path.Combine(installRoot, "Bibata-Original-Ice");
+                        if (Directory.Exists(modernRoot))
+                        {
+                            themeRoot = modernRoot;
+                            themeName = "Bibata-Modern-Ice";
+                        }
+                        else if (Directory.Exists(origRoot))
+                        {
+                            themeRoot = origRoot;
+                            themeName = "Bibata-Original-Ice";
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(themeRoot) || string.IsNullOrEmpty(themeName)) return false;
+
+                int validCount = 0;
+                for (int i = 0; i < SizeOrder.Length; i++)
+                {
+                    string cand = Path.Combine(themeRoot, themeName + "-" + SizeOrder[i] + "-Windows");
+                    if (HasAllCursorFiles(cand)) validCount++;
+                }
+                if (validCount < 2) return false;
+
+                string probe = currentSize;
+                string targetSize = null;
+                string targetDir = null;
+                for (int attempt = 0; attempt < SizeOrder.Length; attempt++)
+                {
+                    probe = GetNextSize(probe);
+                    string cand = Path.Combine(themeRoot, themeName + "-" + probe + "-Windows");
+                    if (HasAllCursorFiles(cand))
+                    {
+                        targetSize = probe;
+                        targetDir = cand;
+                        break;
+                    }
+                }
+                if (targetSize == null || targetDir == null) return false;
+
+                string[] paths = new string[RoleFiles.Length];
+                for (int i = 0; i < RoleFiles.Length; i++)
+                {
+                    paths[i] = Path.Combine(targetDir, RoleFiles[i]);
+                }
+
+                string schemeName = themeName + " (" + targetSize + ")";
+                using (RegistryKey schemesKey = Registry.CurrentUser.CreateSubKey(@"Control Panel\Cursors\Schemes"))
+                {
+                    if (schemesKey != null)
+                    {
+                        schemesKey.SetValue(schemeName, string.Join(",", paths), RegistryValueKind.String);
+                    }
+                }
+
+                using (RegistryKey cursorsKey = Registry.CurrentUser.CreateSubKey(@"Control Panel\Cursors"))
+                {
+                    if (cursorsKey == null) return false;
+                    cursorsKey.SetValue("", schemeName, RegistryValueKind.String);
+                    cursorsKey.SetValue("Scheme Source", 1, RegistryValueKind.DWord);
+                    for (int i = 0; i < RoleNames.Length; i++)
+                    {
+                        cursorsKey.SetValue(RoleNames[i], paths[i], RegistryValueKind.String);
+                    }
+                }
+
+                return NativeMethods.SystemParametersInfo(NativeMethods.SPI_SETCURSORS, 0, IntPtr.Zero, NativeMethods.SPIF_SENDCHANGE);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     internal sealed class RawInputMessageWindow : NativeWindow, IDisposable
     {
         private const int HotkeyId = 1;
         private const int PaletteHotkeyId = 2;
+        private const int CursorSizeHotkeyId = 3;
+        private const int PresetHotkeyId = 4;
 
         private readonly SampleRingBuffer _buffer;
         private readonly ClickRippleBuffer _ripples;
@@ -2789,10 +2966,14 @@ namespace BibataIceTrail
         private readonly OverlayEngine _engine;
         private readonly Action _onHotkeyToggle;
         private readonly Action _onCyclePalette;
+        private readonly Action _onCycleCursorSize;
+        private readonly Action _onCyclePreset;
         private readonly byte[] _rawBuf = new byte[128];
         private readonly uint _rawHeaderSize;
         private bool _hotkeyRegistered;
         private bool _paletteHotkeyRegistered;
+        private bool _cursorSizeHotkeyRegistered;
+        private bool _presetHotkeyRegistered;
         private volatile bool _shakeEnabled = true;
         private volatile bool _dragEnabled = true;
         private volatile bool _scrollEnabled = true;
@@ -2803,7 +2984,9 @@ namespace BibataIceTrail
             InteractionState interaction,
             OverlayEngine engine,
             Action onHotkeyToggle,
-            Action onCyclePalette)
+            Action onCyclePalette,
+            Action onCycleCursorSize,
+            Action onCyclePreset)
         {
             _buffer = buffer;
             _ripples = ripples;
@@ -2811,6 +2994,8 @@ namespace BibataIceTrail
             _engine = engine;
             _onHotkeyToggle = onHotkeyToggle;
             _onCyclePalette = onCyclePalette;
+            _onCycleCursorSize = onCycleCursorSize;
+            _onCyclePreset = onCyclePreset;
             _rawHeaderSize = (uint)Marshal.SizeOf(typeof(NativeMethods.RAWINPUTHEADER));
 
             CreateParams cp = new CreateParams();
@@ -2851,6 +3036,14 @@ namespace BibataIceTrail
                 {
                     _paletteHotkeyRegistered = NativeMethods.RegisterHotKey(Handle, PaletteHotkeyId, mods, NativeMethods.VK_C);
                 }
+                if (!_cursorSizeHotkeyRegistered)
+                {
+                    _cursorSizeHotkeyRegistered = NativeMethods.RegisterHotKey(Handle, CursorSizeHotkeyId, mods, NativeMethods.VK_S);
+                }
+                if (!_presetHotkeyRegistered)
+                {
+                    _presetHotkeyRegistered = NativeMethods.RegisterHotKey(Handle, PresetHotkeyId, mods, NativeMethods.VK_D);
+                }
             }
             else
             {
@@ -2863,6 +3056,16 @@ namespace BibataIceTrail
                 {
                     NativeMethods.UnregisterHotKey(Handle, PaletteHotkeyId);
                     _paletteHotkeyRegistered = false;
+                }
+                if (_cursorSizeHotkeyRegistered)
+                {
+                    NativeMethods.UnregisterHotKey(Handle, CursorSizeHotkeyId);
+                    _cursorSizeHotkeyRegistered = false;
+                }
+                if (_presetHotkeyRegistered)
+                {
+                    NativeMethods.UnregisterHotKey(Handle, PresetHotkeyId);
+                    _presetHotkeyRegistered = false;
                 }
             }
         }
@@ -2879,6 +3082,14 @@ namespace BibataIceTrail
                 else if (hkId == PaletteHotkeyId && _onCyclePalette != null)
                 {
                     _onCyclePalette();
+                }
+                else if (hkId == CursorSizeHotkeyId && _onCycleCursorSize != null)
+                {
+                    _onCycleCursorSize();
+                }
+                else if (hkId == PresetHotkeyId && _onCyclePreset != null)
+                {
+                    _onCyclePreset();
                 }
             }
             else if (m.Msg == NativeMethods.WM_INPUT)
@@ -2963,6 +3174,7 @@ namespace BibataIceTrail
         private readonly Icon _activeIcon;
         private readonly Icon _pausedIcon;
         private bool _colorDialogOpen;
+        private long _lastCursorSwitchTicks;
 
         private ToolStripMenuItem _itemEnabled;
         private ToolStripMenuItem _itemTrailEnabled;
@@ -2994,7 +3206,9 @@ namespace BibataIceTrail
             _inputSink = new RawInputMessageWindow(
                 _buffer, _ripples, _interaction, _engine,
                 new Action(ToggleEnabled),
-                new Action(CyclePalette));
+                new Action(CyclePalette),
+                new Action(CycleCursorSize),
+                new Action(CyclePreset));
             _inputSink.SetTrackingOptions(_config.ShakeLocateEnabled, _config.DragGlowEnabled, _config.ScrollGlowEnabled, _config.HotkeyEnabled);
 
             if (showTrayIcon)
@@ -3078,7 +3292,7 @@ namespace BibataIceTrail
             _itemFullscreen.Click += delegate { ToggleFullscreenPause(); };
             menu.Items.Add(_itemFullscreen);
 
-            _itemHotkeyEnabled = new ToolStripMenuItem("快捷键开关 (G开关 / C换色)");
+            _itemHotkeyEnabled = new ToolStripMenuItem("全局快捷键 (G开关 / C换色 / S指针大小 / D光影大小)");
             _itemHotkeyEnabled.Click += delegate { ToggleHotkeyEnabled(); };
             menu.Items.Add(_itemHotkeyEnabled);
 
@@ -3172,6 +3386,36 @@ namespace BibataIceTrail
             else next = PaletteKind.Ice;
 
             _config.Palette = next;
+            _config.Save();
+            _engine.ApplyConfig(_config);
+            SyncMenuAndIcon();
+            if (_config.Enabled)
+            {
+                _interaction.TriggerPalettePreview(Stopwatch.GetTimestamp());
+                _engine.NotifyInput();
+            }
+        }
+
+        private void CycleCursorSize()
+        {
+            long now = Stopwatch.GetTimestamp();
+            double dtMs = (double)(now - _lastCursorSwitchTicks) * 1000.0 / (double)Stopwatch.Frequency;
+            if (_lastCursorSwitchTicks > 0 && dtMs >= 0.0 && dtMs < 300.0)
+            {
+                return;
+            }
+            _lastCursorSwitchTicks = now;
+            CursorSizeManager.CycleInstalledCursorSize(Application.ExecutablePath);
+        }
+
+        private void CyclePreset()
+        {
+            PresetKind next;
+            if (_config.Preset == PresetKind.Light) next = PresetKind.Standard;
+            else if (_config.Preset == PresetKind.Standard) next = PresetKind.Vivid;
+            else next = PresetKind.Light;
+
+            _config.Preset = next;
             _config.Save();
             _engine.ApplyConfig(_config);
             SyncMenuAndIcon();
@@ -3789,16 +4033,23 @@ namespace BibataIceTrail
                     }
                     bool previewOk = pvOk && previewPixels >= 80;
 
+                    bool cursorSizeLogicOk =
+                        string.Equals(CursorSizeManager.ParseSizeFromFolderName("Bibata-Modern-Ice-Large-Windows"), "Large", StringComparison.Ordinal) &&
+                        string.Equals(CursorSizeManager.ParseSizeFromFolderName("Bibata-Original-Ice-Extra-Large-Windows"), "Extra-Large", StringComparison.Ordinal) &&
+                        string.Equals(CursorSizeManager.GetNextSize("Regular"), "Large", StringComparison.Ordinal) &&
+                        string.Equals(CursorSizeManager.GetNextSize("Large"), "Extra-Large", StringComparison.Ordinal) &&
+                        string.Equals(CursorSizeManager.GetNextSize("Extra-Large"), "Regular", StringComparison.Ordinal);
+
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} silentDefaultOk={17} headerSize={18} alphaViolations={19} elapsedMs={20:F3} fullscreenBusy={21} ulwOk={22} ulwErr={23} ridOk={24} ridErr={25}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} cursorSizeLogicOk={17} silentDefaultOk={18} headerSize={19} alphaViolations={20} elapsedMs={21:F3} fullscreenBusy={22} ulwOk={23} ulwErr={24} ridOk={25} ridErr={26}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
                     {
                         return 1;
                     }
