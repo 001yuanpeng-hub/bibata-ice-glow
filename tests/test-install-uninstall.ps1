@@ -765,6 +765,122 @@ class FailLaunch {
     Write-Host "PASS Case 12: A->B migration inherits Schemes cleanly, leaves no dead entries, and preserves user edits" -ForegroundColor Green
 
     # =========================================================================
+    # Case 13 (Commit 2 #3): Relative -InstallDir .\portable resolves against caller CWD (with spaces)
+    # =========================================================================
+    $cwd13 = Join-Path $testRoot "case13 work dir with spaces"
+    $otherCwd13 = Join-Path $testRoot "case13 other cwd"
+    New-Item -ItemType Directory -Path $cwd13 -Force | Out-Null
+    New-Item -ItemType Directory -Path $otherCwd13 -Force | Out-Null
+    $r13rel = Join-Path $regRoot "case13rel"
+    $c13rel = Join-Path $r13rel "Control Panel\Cursors"
+    $run13rel = Join-Path $r13rel "Software\Microsoft\Windows\CurrentVersion\Run"
+    New-Item -Path (Join-Path $c13rel "Schemes") -Force | Out-Null
+    Set-ItemProperty -Path $c13rel -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+    $expectedAbs13 = Join-Path $cwd13 "portable"
+
+    Push-Location -LiteralPath $cwd13
+    try {
+        & $installPs1 -InstallDir ".\portable" -Size Regular -NoLaunch -RegistryRoot $r13rel -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+
+        # Switch to a completely different working directory and verify every registered/manifest path is absolute & valid
+        Set-Location -LiteralPath $otherCwd13
+        $arrow13 = [string](Get-Item -Path $c13rel).GetValue("Arrow", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $runVal13 = [string](Get-Item -Path $run13rel).GetValue("BibataIceTrail", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $runExe13 = $runVal13.Trim('"')
+        Assert-True ([System.IO.Path]::IsPathRooted($arrow13)) "Case 13: Arrow in registry is not rooted ($arrow13)"
+        Assert-True ($arrow13.StartsWith($expectedAbs13 + "\", [StringComparison]::OrdinalIgnoreCase)) "Case 13: Arrow does not point under expected abs dir ($arrow13)"
+        Assert-True (Test-Path -LiteralPath $arrow13 -PathType Leaf) "Case 13: Arrow target file not found from other CWD ($arrow13)"
+        Assert-True ([System.IO.Path]::IsPathRooted($runExe13)) "Case 13: Run entry is not rooted ($runVal13)"
+        Assert-True ($runExe13.StartsWith($expectedAbs13 + "\", [StringComparison]::OrdinalIgnoreCase)) "Case 13: Run entry does not point under expected abs dir ($runVal13)"
+        Assert-True (Test-Path -LiteralPath $runExe13 -PathType Leaf) "Case 13: Run target EXE not found from other CWD ($runExe13)"
+
+        $m13 = Get-Content -LiteralPath (Join-Path $expectedAbs13 "bibata-ice-glow-manifest.json") -Raw | ConvertFrom-Json
+        Assert-True ($m13.installDir -eq $expectedAbs13) "Case 13: Manifest installDir not canonical abs ($($m13.installDir))"
+        Assert-True ([System.IO.Path]::IsPathRooted([string]$m13.trailExePath)) "Case 13: Manifest trailExePath not rooted"
+        foreach ($mp in (@($m13.managedThemeDirs) + @($m13.managedCursorDirs) + @($m13.managedCursorFiles))) {
+            Assert-True ([System.IO.Path]::IsPathRooted([string]$mp)) "Case 13: Managed path in manifest is relative: $mp"
+        }
+
+        # Uninstall using relative path from original working directory
+        Set-Location -LiteralPath $cwd13
+        & $uninstallPs1 -InstallDir ".\portable" -RegistryRoot $r13rel -SkipCursorRefresh | Out-Null
+        Assert-True (-not (Test-Path -LiteralPath $expectedAbs13)) "Case 13: Relative-path uninstall did not clean portable dir"
+        Assert-True ($null -eq (Get-ItemProperty -Path $run13rel -Name "BibataIceTrail" -ErrorAction SilentlyContinue)) "Case 13: Relative-path uninstall did not clean Run entry"
+    }
+    finally {
+        Pop-Location
+    }
+    Write-Host "PASS Case 13: Relative -InstallDir resolves to absolute path across registry/Run/manifest and uninstalls cleanly" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 14 (Commit 2 #4): Reinstall sizing (3->1, 1->3), missing Help.cur repair, private files in extra dir, idempotency & rollback
+    # =========================================================================
+    $d14sz = Join-Path $testRoot "case14_reinstall_sizing"
+    $r14sz = Join-Path $regRoot "case14sz"
+    New-Item -Path (Join-Path $r14sz "Control Panel\Cursors\Schemes") -Force | Out-Null
+
+    # 14a: 3 sizes -> drop private file in Large -> reinstall with -SingleSize (3->1) -> repeat for idempotency
+    & $installPs1 -InstallDir $d14sz -Size Regular -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $theme14 = Join-Path $d14sz "Bibata-Modern-Ice"
+    $regDir14 = Join-Path $theme14 "Bibata-Modern-Ice-Regular-Windows"
+    $largeDir14 = Join-Path $theme14 "Bibata-Modern-Ice-Large-Windows"
+    $xlDir14 = Join-Path $theme14 "Bibata-Modern-Ice-Extra-Large-Windows"
+    Assert-True ((Test-Path -LiteralPath $regDir14) -and (Test-Path -LiteralPath $largeDir14) -and (Test-Path -LiteralPath $xlDir14)) "Case 14a: Initial 3 sizes missing"
+    $privInLarge = Join-Path $largeDir14 "my-private-in-large.txt"
+    Set-Content -Path $privInLarge -Value "keep-me-on-singlesize" -Encoding UTF8
+
+    & $installPs1 -InstallDir $d14sz -Size Regular -SingleSize -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $regDir14 "Pointer.cur")) "Case 14a: Regular missing after 3->1"
+    Assert-True (-not (Test-Path -LiteralPath $xlDir14)) "Case 14a: Extra-Large not pruned on 3->1"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $largeDir14 "Pointer.cur"))) "Case 14a: Managed Large cursor files not pruned on 3->1"
+    Assert-True (Test-Path -LiteralPath $privInLarge) "Case 14a: Private file inside pruned Large folder was deleted!"
+    $m14a1 = Get-Content -LiteralPath (Join-Path $d14sz "bibata-ice-glow-manifest.json") -Raw | ConvertFrom-Json
+    Assert-True (@($m14a1.managedCursorFiles | Where-Object { $_ -like "*Large-Windows*" }).Count -eq 0) "Case 14a: Manifest still lists pruned Large/Extra-Large files"
+
+    # Repeat -SingleSize reinstall: must be idempotent
+    & $installPs1 -InstallDir $d14sz -Size Regular -SingleSize -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True (Test-Path -LiteralPath $privInLarge) "Case 14a: Repeat SingleSize deleted private file"
+    Assert-True (-not (Test-Path -LiteralPath $xlDir14)) "Case 14a: Repeat SingleSize recreated Extra-Large"
+
+    # 14b: 1 size -> normal reinstall (1->3) -> repeat for idempotency
+    & $installPs1 -InstallDir $d14sz -Size Regular -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True (Test-Path -LiteralPath (Join-Path $largeDir14 "Pointer.cur")) "Case 14b: Large not restored on 1->3"
+    Assert-True (Test-Path -LiteralPath (Join-Path $xlDir14 "Pointer.cur")) "Case 14b: Extra-Large not restored on 1->3"
+    Assert-True (Test-Path -LiteralPath $privInLarge) "Case 14b: Private file lost on 1->3"
+    $m14b = Get-Content -LiteralPath (Join-Path $d14sz "bibata-ice-glow-manifest.json") -Raw | ConvertFrom-Json
+    Assert-True (@($m14b.managedCursorFiles | Where-Object { $_ -like "*Extra-Large-Windows*" }).Count -eq 17) "Case 14b: Manifest missing restored Extra-Large files"
+    & $installPs1 -InstallDir $d14sz -Size Regular -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True ((Test-Path -LiteralPath (Join-Path $xlDir14 "Help.cur")) -and (Test-Path -LiteralPath $privInLarge)) "Case 14b: Repeat 3-size install inconsistent"
+
+    # 14c: Delete ONLY Help.cur (Pointer.cur remains) -> reinstall repairs Help.cur
+    $help14 = Join-Path $regDir14 "Help.cur"
+    Remove-Item -LiteralPath $help14 -Force
+    Assert-True (-not (Test-Path -LiteralPath $help14)) "Case 14c: Failed to delete Help.cur"
+    & $installPs1 -InstallDir $d14sz -Size Regular -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True (Test-Path -LiteralPath $help14 -PathType Leaf) "Case 14c: Reinstall did not repair missing Help.cur while Pointer.cur existed!"
+
+    # 14d: Rollback of -SingleSize prune when manifest is locked
+    $xlPtrHashBefore = Get-FileSha256 (Join-Path $xlDir14 "Pointer.cur")
+    $largeBusyHashBefore = Get-FileSha256 (Join-Path $largeDir14 "Busy.ani")
+    $manifest14 = Join-Path $d14sz "bibata-ice-glow-manifest.json"
+    $lockScript14 = "`$fs = [System.IO.File]::Open('$manifest14', 'Open', 'ReadWrite', 'None'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
+    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript14 -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 350
+    $threw14d = $false
+    try {
+        & $installPs1 -InstallDir $d14sz -Size Regular -SingleSize -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    }
+    catch {
+        $threw14d = $true
+    }
+    Assert-True $threw14d "Case 14d: Locked manifest should fail SingleSize prune"
+    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
+    Assert-True ((Get-FileSha256 (Join-Path $xlDir14 "Pointer.cur")) -eq $xlPtrHashBefore) "Case 14d: Pruned Extra-Large Pointer.cur not rolled back!"
+    Assert-True ((Get-FileSha256 (Join-Path $largeDir14 "Busy.ani")) -eq $largeBusyHashBefore) "Case 14d: Pruned Large Busy.ani not rolled back!"
+    Assert-True (Test-Path -LiteralPath $privInLarge) "Case 14d: Private file lost during prune rollback!"
+    Write-Host "PASS Case 14: Reinstall 3->1, 1->3, missing Help.cur repair, private file preservation, idempotency & prune rollback all pass" -ForegroundColor Green
+
+    # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched
     # =========================================================================
     $realPidsAfter = @(if (Test-Path $realExePath) { Get-BibataPidsByPath $realExePath } else { @() }) -join ","

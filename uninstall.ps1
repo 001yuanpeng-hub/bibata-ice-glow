@@ -19,6 +19,15 @@ function Normalize-BibataPath([string]$p) {
     }
 }
 
+function Resolve-BibataAbsolutePath([string]$rawPath) {
+    if ([string]::IsNullOrWhiteSpace($rawPath)) { return "" }
+    $trimmed = $rawPath.Trim().Trim('"')
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($trimmed)
+    $full = [System.IO.Path]::GetFullPath($resolved)
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }
+    return $full
+}
+
 function Get-BibataCommandExePath([string]$cmd) {
     if ([string]::IsNullOrWhiteSpace($cmd)) { return "" }
     $t = $cmd.Trim()
@@ -208,6 +217,7 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
         $InstallDir = Join-Path $env:LOCALAPPDATA "BibataIceGlow"
     }
 }
+$InstallDir = Resolve-BibataAbsolutePath $InstallDir
 
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
 $manifest = $null

@@ -42,6 +42,38 @@ function Add-UniquePath($list, [string]$p) {
     $list.Add([string]$p)
 }
 
+function Remove-PathFromList($list, [string]$targetPath) {
+    if ($null -eq $list -or [string]::IsNullOrWhiteSpace($targetPath)) { return }
+    $normTarget = Normalize-BibataPath $targetPath
+    for ($i = $list.Count - 1; $i -ge 0; $i--) {
+        if ((Normalize-BibataPath ([string]$list[$i])) -eq $normTarget) {
+            $list.RemoveAt($i)
+        }
+    }
+}
+
+function Resolve-BibataAbsolutePath([string]$rawPath) {
+    if ([string]::IsNullOrWhiteSpace($rawPath)) { return "" }
+    $trimmed = $rawPath.Trim().Trim('"')
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($trimmed)
+    $full = [System.IO.Path]::GetFullPath($resolved)
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }
+    return $full
+}
+
+function Test-CursorSizeComplete([string]$dirPath, $roleMap) {
+    if ([string]::IsNullOrWhiteSpace($dirPath) -or -not (Test-Path -LiteralPath $dirPath -PathType Container)) {
+        return $false
+    }
+    foreach ($role in $roleMap.Keys) {
+        $rf = Join-Path $dirPath $roleMap[$role]
+        if (-not (Test-Path -LiteralPath $rf -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Get-FileSha256([string]$path) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return "" }
     return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
@@ -466,6 +498,13 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
         $InstallDir = Join-Path $env:LOCALAPPDATA "BibataIceGlow"
     }
 }
+$InstallDir = Resolve-BibataAbsolutePath $InstallDir
+if (-not [string]::IsNullOrWhiteSpace($TestCursorZipPath)) {
+    $TestCursorZipPath = Resolve-BibataAbsolutePath $TestCursorZipPath
+}
+if (-not [string]::IsNullOrWhiteSpace($TestSourceOverride)) {
+    $TestSourceOverride = Resolve-BibataAbsolutePath $TestSourceOverride
+}
 
 Write-Host "Install directory: $InstallDir" -ForegroundColor Cyan
 
@@ -618,7 +657,18 @@ try {
         $cursorsKey = Join-Path $RegistryRoot "Control Panel\Cursors"
         $schemesKey = Join-Path $RegistryRoot "Control Panel\Cursors\Schemes"
 
-        if (-not (Test-Path -LiteralPath (Join-Path $cursorDir "Pointer.cur"))) {
+        $allSizes = @("Regular", "Large", "Extra-Large")
+        $desiredSizes = if ($SingleSize) { @($Size) } else { $allSizes }
+        $needsExtract = $false
+        foreach ($dsz in $desiredSizes) {
+            $dszDir = Join-Path $themeRoot "$themeName-$dsz-Windows"
+            if (-not (Test-CursorSizeComplete $dszDir $roleMap)) {
+                $needsExtract = $true
+                break
+            }
+        }
+
+        if ($needsExtract) {
             $cursorStageDir = Join-Path $env:TEMP ("bibata_cursor_stage_" + [Guid]::NewGuid().ToString("N"))
             $cursorStageExtract = Join-Path $cursorStageDir "extracted"
             New-Item -ItemType Directory -Path $cursorStageExtract -Force | Out-Null
@@ -675,13 +725,7 @@ try {
             }
         }
         else {
-            foreach ($role in $roleMap.Keys) {
-                $rf = Join-Path $cursorDir $roleMap[$role]
-                if (-not (Test-Path -LiteralPath $rf)) {
-                    throw "Missing cursor file for ${role}: $rf"
-                }
-            }
-            Write-Host "Cursor files already present at $cursorDir" -ForegroundColor Green
+            Write-Host "Cursor files already complete for requested size(s) at $themeRoot" -ForegroundColor Green
         }
     }
 
@@ -849,6 +893,56 @@ try {
                         }
                         else {
                             $hashTable[$h] = $mf
+                        }
+                    }
+                }
+            }
+
+            if ($SingleSize) {
+                $managedDirNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+                foreach ($md in $managedCursorDirs) {
+                    $nm = Normalize-BibataPath ([string]$md)
+                    if (-not [string]::IsNullOrEmpty($nm)) { $managedDirNormSet.Add($nm) | Out-Null }
+                }
+
+                foreach ($extraSz in @("Regular", "Large", "Extra-Large")) {
+                    if ($extraSz -eq $Size) { continue }
+                    $extraSizeDir = Join-Path $themeRoot "$themeName-$extraSz-Windows"
+                    $extraDirNorm = Normalize-BibataPath $extraSizeDir
+                    $extraPrefix = $extraDirNorm + "\"
+
+                    foreach ($mf in @($managedCursorFiles)) {
+                        $normMf = Normalize-BibataPath ([string]$mf)
+                        if (-not $normMf.StartsWith($extraPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                        if (Test-Path -LiteralPath $mf -PathType Leaf) {
+                            if (-not $createdCursorNormSet.Contains($normMf) -and -not $backedUpCursorNormSet.Contains($normMf)) {
+                                if ([string]::IsNullOrWhiteSpace($cursorBackupDir)) {
+                                    $cursorBackupDir = Join-Path $env:TEMP ("bibata_cursor_bak_" + [Guid]::NewGuid().ToString("N"))
+                                    New-Item -ItemType Directory -Path $cursorBackupDir -Force | Out-Null
+                                }
+                                $bakFile = Join-Path $cursorBackupDir ("bak_" + $overwrittenCursorBackups.Count + ".bin")
+                                $origHash = Get-FileSha256 $mf
+                                [System.IO.File]::Copy($mf, $bakFile, $true)
+                                $overwrittenCursorBackups.Add([pscustomobject]@{
+                                    Target = $mf
+                                    Backup = $bakFile
+                                    Hash   = $origHash
+                                })
+                                $backedUpCursorNormSet.Add($normMf) | Out-Null
+                            }
+                            Remove-Item -LiteralPath $mf -Force -ErrorAction Stop
+                        }
+                        Remove-PathFromList $managedCursorFiles $mf
+                    }
+
+                    if ($managedDirNormSet.Contains($extraDirNorm) -and (Test-Path -LiteralPath $extraSizeDir -PathType Container)) {
+                        $remExtra = @(Get-ChildItem -LiteralPath $extraSizeDir -Force -ErrorAction SilentlyContinue)
+                        if ($remExtra.Count -eq 0) {
+                            Remove-Item -LiteralPath $extraSizeDir -Force -ErrorAction SilentlyContinue
+                            Remove-PathFromList $managedCursorDirs $extraSizeDir
+                        }
+                        else {
+                            Write-Host "Preserving non-empty extra size folder with user files: $extraSizeDir" -ForegroundColor Yellow
                         }
                     }
                 }
