@@ -1240,6 +1240,9 @@ namespace BibataIceTrail
 
     internal sealed class TrailRenderer : IDisposable
     {
+        private const int MaxFrameWidth = 2560;
+        private const int MaxFrameHeight = 1600;
+
         private IntPtr _memDC;
         private IntPtr _dibBitmap;
         private IntPtr _oldBitmap;
@@ -1298,6 +1301,10 @@ namespace BibataIceTrail
             float bMaxY = float.MinValue;
 
             bool hasTrail = false;
+            bool hasNewestTrail = false;
+            long newestTrailTicks = long.MinValue;
+            int newestTrailX = 0;
+            int newestTrailY = 0;
             _subdivNodes.Clear();
             double freq = (double)Stopwatch.Frequency;
 
@@ -1330,14 +1337,27 @@ namespace BibataIceTrail
                         {
                             int before = _subdivNodes.Count;
                             SubdivideCentripetalCatmullRom(_strokeNodes, _subdivNodes);
+                            bool strokeVisible = false;
                             for (int i = before; i < _subdivNodes.Count; i++)
                             {
                                 SplineNode n = _subdivNodes[i];
                                 if (n.Env < 0.0f) continue;
+                                if (n.Env > 0.01f && n.U > 0.01f) strokeVisible = true;
                                 if (n.X < minX) minX = n.X;
                                 if (n.Y < minY) minY = n.Y;
                                 if (n.X > maxX) maxX = n.X;
                                 if (n.Y > maxY) maxY = n.Y;
+                            }
+                            if (strokeVisible)
+                            {
+                                long sTicks = samples[end - 1].Ticks;
+                                if (!hasNewestTrail || sTicks >= newestTrailTicks)
+                                {
+                                    hasNewestTrail = true;
+                                    newestTrailTicks = sTicks;
+                                    newestTrailX = samples[end - 1].X;
+                                    newestTrailY = samples[end - 1].Y;
+                                }
                             }
                         }
                     }
@@ -1365,6 +1385,10 @@ namespace BibataIceTrail
             }
 
             bool hasAnyRipple = false;
+            long newestRippleTicks = long.MinValue;
+            int newestRippleX = 0;
+            int newestRippleY = 0;
+            float newestRippleReach = 0.0f;
             if (rippleEnabled && ripples != null && rippleCount > 0)
             {
                 for (int i = 0; i < rippleCount; i++)
@@ -1385,14 +1409,23 @@ namespace BibataIceTrail
                     if (ry - reach < bMinY) bMinY = ry - reach;
                     if (rx + reach > bMaxX) bMaxX = rx + reach;
                     if (ry + reach > bMaxY) bMaxY = ry + reach;
+                    if (!hasAnyRipple || ripples[i].Ticks >= newestRippleTicks)
+                    {
+                        newestRippleTicks = ripples[i].Ticks;
+                        newestRippleX = ripples[i].X;
+                        newestRippleY = ripples[i].Y;
+                        newestRippleReach = reach;
+                    }
                     hasAnyRipple = true;
                 }
             }
 
+            float cursorEffectReach = 0.0f;
             bool hasShake = (shakeProgress >= 0.0f && shakeProgress < 1.0f);
             if (hasShake)
             {
                 float shakeReach = 60.0f * scale;
+                if (shakeReach > cursorEffectReach) cursorEffectReach = shakeReach;
                 float sx = (float)cursorX;
                 float sy = (float)cursorY;
                 if (sx - shakeReach < bMinX) bMinX = sx - shakeReach;
@@ -1405,6 +1438,7 @@ namespace BibataIceTrail
             if (hasDrag)
             {
                 float dragReach = 24.0f * scale;
+                if (dragReach > cursorEffectReach) cursorEffectReach = dragReach;
                 float dx = (float)cursorX;
                 float dy = (float)cursorY;
                 if (dx - dragReach < bMinX) bMinX = dx - dragReach;
@@ -1417,6 +1451,7 @@ namespace BibataIceTrail
             if (hasScroll)
             {
                 float scrollReach = 28.0f * scale;
+                if (scrollReach > cursorEffectReach) cursorEffectReach = scrollReach;
                 float sx = (float)cursorX;
                 float sy = (float)cursorY;
                 if (sx - scrollReach < bMinX) bMinX = sx - scrollReach;
@@ -1429,6 +1464,7 @@ namespace BibataIceTrail
             if (hasPreview)
             {
                 float prevReach = (12.0f + preset.RippleMaxRadius * 0.65f + preset.HaloRadius * 0.65f) * scale;
+                if (prevReach > cursorEffectReach) cursorEffectReach = prevReach;
                 float px = (float)cursorX;
                 float py = (float)cursorY;
                 if (px - prevReach < bMinX) bMinX = px - prevReach;
@@ -1439,16 +1475,119 @@ namespace BibataIceTrail
 
             if (!hasTrail && !hasAnyRipple && !hasShake && !hasDrag && !hasScroll && !hasPreview) return false;
 
-            outX = (int)Math.Floor(bMinX);
-            outY = (int)Math.Floor(bMinY);
-            int right = (int)Math.Ceiling(bMaxX);
-            int bottom = (int)Math.Ceiling(bMaxY);
-            outW = right - outX;
-            outH = bottom - outY;
+            int rawLeft = (int)Math.Floor(bMinX);
+            int rawTop = (int)Math.Floor(bMinY);
+            int rawRight = (int)Math.Ceiling(bMaxX);
+            int rawBottom = (int)Math.Ceiling(bMaxY);
+            int rawW = rawRight - rawLeft;
+            int rawH = rawBottom - rawTop;
 
-            if (outW <= 0 || outH <= 0) return false;
-            if (outW > 2560) outW = 2560;
-            if (outH > 1600) outH = 1600;
+            if (rawW <= 0 || rawH <= 0) return false;
+
+            if (rawW <= MaxFrameWidth && rawH <= MaxFrameHeight)
+            {
+                outX = rawLeft;
+                outY = rawTop;
+                outW = rawW;
+                outH = rawH;
+            }
+            else
+            {
+                int prioX = cursorX;
+                int prioY = cursorY;
+                float prioReach = 64.0f;
+                if (cursorEffectReach > 0.0f)
+                {
+                    prioX = cursorX;
+                    prioY = cursorY;
+                    prioReach = cursorEffectReach;
+                }
+                else if (hasAnyRipple && (!hasTrail || !hasNewestTrail || newestRippleTicks >= newestTrailTicks))
+                {
+                    prioX = newestRippleX;
+                    prioY = newestRippleY;
+                    prioReach = newestRippleReach;
+                }
+                else if (hasTrail && hasNewestTrail)
+                {
+                    prioX = newestTrailX;
+                    prioY = newestTrailY;
+                    prioReach = trailPad;
+                }
+
+                int prioMinX = (int)Math.Floor((float)prioX - prioReach);
+                int prioMaxX = (int)Math.Ceiling((float)prioX + prioReach);
+                int prioMinY = (int)Math.Floor((float)prioY - prioReach);
+                int prioMaxY = (int)Math.Ceiling((float)prioY + prioReach);
+
+                int clipLeft, clipRight, clipTop, clipBottom;
+                ComputeClampedAxis(rawLeft, rawRight, prioX, prioMinX, prioMaxX, MaxFrameWidth, out clipLeft, out clipRight);
+                ComputeClampedAxis(rawTop, rawBottom, prioY, prioMinY, prioMaxY, MaxFrameHeight, out clipTop, out clipBottom);
+
+                int tMinX = int.MaxValue;
+                int tMinY = int.MaxValue;
+                int tMaxX = int.MinValue;
+                int tMaxY = int.MinValue;
+
+                if (hasTrail)
+                {
+                    int nodeCount = _subdivNodes.Count;
+                    for (int i = 0; i < nodeCount - 1; i++)
+                    {
+                        SplineNode na = _subdivNodes[i];
+                        SplineNode nb = _subdivNodes[i + 1];
+                        if (na.Env < 0.0f || nb.Env < 0.0f) continue;
+                        float maxEnv = na.Env > nb.Env ? na.Env : nb.Env;
+                        float maxU = na.U > nb.U ? na.U : nb.U;
+                        if (maxEnv <= 0.005f || maxU <= 0.005f) continue;
+
+                        int sx0 = (int)Math.Floor((na.X < nb.X ? na.X : nb.X) - trailPad);
+                        int sy0 = (int)Math.Floor((na.Y < nb.Y ? na.Y : nb.Y) - trailPad);
+                        int sx1 = (int)Math.Ceiling((na.X > nb.X ? na.X : nb.X) + trailPad);
+                        int sy1 = (int)Math.Ceiling((na.Y > nb.Y ? na.Y : nb.Y) + trailPad);
+                        AccumulateClippedBounds(sx0, sy0, sx1, sy1, clipLeft, clipTop, clipRight, clipBottom, ref tMinX, ref tMinY, ref tMaxX, ref tMaxY);
+                    }
+                }
+
+                if (hasAnyRipple)
+                {
+                    for (int i = 0; i < rippleCount; i++)
+                    {
+                        double ageMs = (double)(nowTicks - ripples[i].Ticks) * 1000.0 / freq;
+                        float p = (float)(ageMs / (double)preset.RippleDurationMs);
+                        if (p < 0.0f || p >= 1.0f) continue;
+
+                        float invP = 1.0f - p;
+                        float ease = 1.0f - invP * invP * invP;
+                        float rOuter = (4.0f + (preset.RippleMaxRadius - 4.0f) * ease) * scale;
+                        float ringHaloW = (7.0f - 1.5f * p) * scale;
+                        float reach = rOuter + ringHaloW + 2.0f;
+
+                        int rx0 = (int)Math.Floor((float)ripples[i].X - reach);
+                        int ry0 = (int)Math.Floor((float)ripples[i].Y - reach);
+                        int rx1 = (int)Math.Ceiling((float)ripples[i].X + reach);
+                        int ry1 = (int)Math.Ceiling((float)ripples[i].Y + reach);
+                        AccumulateClippedBounds(rx0, ry0, rx1, ry1, clipLeft, clipTop, clipRight, clipBottom, ref tMinX, ref tMinY, ref tMaxX, ref tMaxY);
+                    }
+                }
+
+                if (cursorEffectReach > 0.0f)
+                {
+                    int cx0 = (int)Math.Floor((float)cursorX - cursorEffectReach);
+                    int cy0 = (int)Math.Floor((float)cursorY - cursorEffectReach);
+                    int cx1 = (int)Math.Ceiling((float)cursorX + cursorEffectReach);
+                    int cy1 = (int)Math.Ceiling((float)cursorY + cursorEffectReach);
+                    AccumulateClippedBounds(cx0, cy0, cx1, cy1, clipLeft, clipTop, clipRight, clipBottom, ref tMinX, ref tMinY, ref tMaxX, ref tMaxY);
+                }
+
+                if (tMaxX <= tMinX || tMaxY <= tMinY) return false;
+                outX = tMinX;
+                outY = tMinY;
+                outW = tMaxX - tMinX;
+                outH = tMaxY - tMinY;
+                if (outW > MaxFrameWidth) outW = MaxFrameWidth;
+                if (outH > MaxFrameHeight) outH = MaxFrameHeight;
+            }
 
             bool trackColor = (palette.Mode != PaletteMode.Solid);
             EnsureBuffers(outW, outH, trackColor);
@@ -1481,6 +1620,63 @@ namespace BibataIceTrail
             float timeSec = (float)((double)(nowTicks % (Stopwatch.Frequency * 3600L)) / (double)Stopwatch.Frequency);
             int nonZero = CompositePremultiplied(outW, outH, preset, palette, timeSec);
             return nonZero > 0;
+        }
+
+        private static void ComputeClampedAxis(
+            int rawMin,
+            int rawMax,
+            int anchor,
+            int prioMin,
+            int prioMax,
+            int maxSpan,
+            out int clipMin,
+            out int clipMax)
+        {
+            if (rawMax - rawMin <= maxSpan)
+            {
+                clipMin = rawMin;
+                clipMax = rawMax;
+                return;
+            }
+
+            int minStart = rawMin;
+            int maxStart = rawMax - maxSpan;
+            int start = anchor - (maxSpan / 2);
+            if (prioMax - prioMin <= maxSpan)
+            {
+                if (prioMin < start) start = prioMin;
+                if (prioMax > start + maxSpan) start = prioMax - maxSpan;
+            }
+            if (start < minStart) start = minStart;
+            if (start > maxStart) start = maxStart;
+
+            clipMin = start;
+            clipMax = start + maxSpan;
+        }
+
+        private static void AccumulateClippedBounds(
+            int elemMinX,
+            int elemMinY,
+            int elemMaxX,
+            int elemMaxY,
+            int clipMinX,
+            int clipMinY,
+            int clipMaxX,
+            int clipMaxY,
+            ref int tMinX,
+            ref int tMinY,
+            ref int tMaxX,
+            ref int tMaxY)
+        {
+            int ix0 = elemMinX > clipMinX ? elemMinX : clipMinX;
+            int iy0 = elemMinY > clipMinY ? elemMinY : clipMinY;
+            int ix1 = elemMaxX < clipMaxX ? elemMaxX : clipMaxX;
+            int iy1 = elemMaxY < clipMaxY ? elemMaxY : clipMaxY;
+            if (ix0 >= ix1 || iy0 >= iy1) return;
+            if (ix0 < tMinX) tMinX = ix0;
+            if (iy0 < tMinY) tMinY = iy0;
+            if (ix1 > tMaxX) tMaxX = ix1;
+            if (iy1 > tMaxY) tMaxY = iy1;
         }
 
         private void BuildStrokeNodes(TrailSample[] samples, int start, int len, long nowTicks, float lifetimeMs, uint dpi)
@@ -1768,6 +1964,7 @@ namespace BibataIceTrail
                     if (y0 < 0) y0 = 0;
                     if (x1 >= bboxW) x1 = bboxW - 1;
                     if (y1 >= bboxH) y1 = bboxH - 1;
+                    if (x0 > x1 || y0 > y1) continue;
 
                     for (int py = y0; py <= y1; py++)
                     {
@@ -1893,6 +2090,7 @@ namespace BibataIceTrail
                     if (y0 < 0) y0 = 0;
                     if (x1 >= bboxW) x1 = bboxW - 1;
                     if (y1 >= bboxH) y1 = bboxH - 1;
+                    if (x0 > x1 || y0 > y1) continue;
 
                     for (int py = y0; py <= y1; py++)
                     {
@@ -2019,6 +2217,7 @@ namespace BibataIceTrail
             if (y0 < 0) y0 = 0;
             if (x1 >= bboxW) x1 = bboxW - 1;
             if (y1 >= bboxH) y1 = bboxH - 1;
+            if (x0 > x1 || y0 > y1) return;
 
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
@@ -2105,6 +2304,7 @@ namespace BibataIceTrail
             if (y0 < 0) y0 = 0;
             if (x1 >= bboxW) x1 = bboxW - 1;
             if (y1 >= bboxH) y1 = bboxH - 1;
+            if (x0 > x1 || y0 > y1) return;
 
             float haloMax = 0.72f * dragAlpha;
             float coreMax = 0.44f * dragAlpha;
@@ -2183,6 +2383,7 @@ namespace BibataIceTrail
             if (y0 < 0) y0 = 0;
             if (x1 >= bboxW) x1 = bboxW - 1;
             if (y1 >= bboxH) y1 = bboxH - 1;
+            if (x0 > x1 || y0 > y1) return;
 
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
@@ -2262,6 +2463,7 @@ namespace BibataIceTrail
             if (y0 < 0) y0 = 0;
             if (x1 >= bboxW) x1 = bboxW - 1;
             if (y1 >= bboxH) y1 = bboxH - 1;
+            if (x0 > x1 || y0 > y1) return;
 
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
@@ -4271,16 +4473,60 @@ namespace BibataIceTrail
                     }
                     bool missingAnchorOk = !noAnchor && oneSampleAnchor && nextValidAnchor && nextFrameOk && nextPixels >= 80;
 
+                    // Multi-monitor rapid click clamping checks
+                    ClickRipple[] mmLR = new ClickRipple[2];
+                    mmLR[0].X = 140; mmLR[0].Y = 450; mmLR[0].Ticks = nowTicks - (long)(100.0 * freq / 1000.0); mmLR[0].Kind = 0;
+                    mmLR[1].X = 3320; mmLR[1].Y = 450; mmLR[1].Ticks = nowTicks - (long)(30.0 * freq / 1000.0); mmLR[1].Kind = 0;
+                    int mlrx, mlry, mlrw, mlrh;
+                    bool mmLROk = renderer.RenderFrame(null, 0, false, mmLR, 2, true, 3320, 450, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mlrx, out mlry, out mlrw, out mlrh);
+                    int mmLRNewPx = mmLROk ? CountVisiblePixelsNear(renderer, mlrx, mlry, mlrw, mlrh, 3320, 450, 64, ref alphaViolations) : 0;
+
+                    ClickRipple[] mmRL = new ClickRipple[2];
+                    mmRL[0].X = 3320; mmRL[0].Y = 450; mmRL[0].Ticks = nowTicks - (long)(100.0 * freq / 1000.0); mmRL[0].Kind = 0;
+                    mmRL[1].X = 140; mmRL[1].Y = 450; mmRL[1].Ticks = nowTicks - (long)(30.0 * freq / 1000.0); mmRL[1].Kind = 0;
+                    int mrlx, mrly, mrlw, mrlh;
+                    bool mmRLOk = renderer.RenderFrame(null, 0, false, mmRL, 2, true, 140, 450, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mrlx, out mrly, out mrlw, out mrlh);
+                    int mmRLNewPx = mmRLOk ? CountVisiblePixelsNear(renderer, mrlx, mrly, mrlw, mrlh, 140, 450, 64, ref alphaViolations) : 0;
+
+                    ClickRipple[] mmTB = new ClickRipple[2];
+                    mmTB[0].X = 500; mmTB[0].Y = 120; mmTB[0].Ticks = nowTicks - (long)(100.0 * freq / 1000.0); mmTB[0].Kind = 0;
+                    mmTB[1].X = 500; mmTB[1].Y = 2100; mmTB[1].Ticks = nowTicks - (long)(30.0 * freq / 1000.0); mmTB[1].Kind = 0;
+                    int mtbx, mtby, mtbw, mtbh;
+                    bool mmTBOk = renderer.RenderFrame(null, 0, false, mmTB, 2, true, 500, 2100, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mtbx, out mtby, out mtbw, out mtbh);
+                    int mmTBNewPx = mmTBOk ? CountVisiblePixelsNear(renderer, mtbx, mtby, mtbw, mtbh, 500, 2100, 64, ref alphaViolations) : 0;
+
+                    ClickRipple[] mmBT = new ClickRipple[2];
+                    mmBT[0].X = 500; mmBT[0].Y = 2100; mmBT[0].Ticks = nowTicks - (long)(100.0 * freq / 1000.0); mmBT[0].Kind = 0;
+                    mmBT[1].X = 500; mmBT[1].Y = 120; mmBT[1].Ticks = nowTicks - (long)(30.0 * freq / 1000.0); mmBT[1].Kind = 0;
+                    int mbtx, mbty, mbtw, mbth;
+                    bool mmBTOk = renderer.RenderFrame(null, 0, false, mmBT, 2, true, 500, 120, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mbtx, out mbty, out mbtw, out mbth);
+                    int mmBTNewPx = mmBTOk ? CountVisiblePixelsNear(renderer, mbtx, mbty, mbtw, mbth, 500, 120, 64, ref alphaViolations) : 0;
+
+                    ClickRipple[] mmNear = new ClickRipple[2];
+                    mmNear[0].X = 720; mmNear[0].Y = 300; mmNear[0].Ticks = nowTicks - (long)(100.0 * freq / 1000.0); mmNear[0].Kind = 0;
+                    mmNear[1].X = 760; mmNear[1].Y = 330; mmNear[1].Ticks = nowTicks - (long)(30.0 * freq / 1000.0); mmNear[1].Kind = 0;
+                    int mnx, mny, mnw, mnh;
+                    bool mmNearOk = renderer.RenderFrame(null, 0, false, mmNear, 2, true, 760, 330, -1.0f, 0.0f, 0.0f, 0, -1.0f, -1.0f, nowTicks, 144, preset, palette, out mnx, out mny, out mnw, out mnh);
+                    int mmNearOldPx = mmNearOk ? CountVisiblePixelsNear(renderer, mnx, mny, mnw, mnh, 720, 300, 64, ref alphaViolations) : 0;
+                    int mmNearNewPx = mmNearOk ? CountVisiblePixelsNear(renderer, mnx, mny, mnw, mnh, 760, 330, 64, ref alphaViolations) : 0;
+
+                    bool multiMonitorRippleOk =
+                        mmLROk && mlrw <= 2560 && mlrh <= 1600 && mmLRNewPx >= 80 &&
+                        mmRLOk && mrlw <= 2560 && mrlh <= 1600 && mmRLNewPx >= 80 &&
+                        mmTBOk && mtbw <= 2560 && mtbh <= 1600 && mmTBNewPx >= 80 &&
+                        mmBTOk && mbtw <= 2560 && mbth <= 1600 && mmBTNewPx >= 80 &&
+                        mmNearOk && mnw <= 2560 && mnh <= 1600 && mmNearOldPx >= 80 && mmNearNewPx >= 80;
+
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} missingAnchorOk={18} cursorSizeLogicOk={19} silentDefaultOk={20} headerSize={21} alphaViolations={22} elapsedMs={23:F3} fullscreenBusy={24} ulwOk={25} ulwErr={26} ridOk={27} ridErr={28}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, missingAnchorOk, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} missingAnchorOk={18} multiMonitorRippleOk={19} mmPx=({20},{21},{22},{23},{24}/{25}) cursorSizeLogicOk={26} silentDefaultOk={27} headerSize={28} alphaViolations={29} elapsedMs={30:F3} fullscreenBusy={31} ulwOk={32} ulwErr={33} ridOk={34} ridErr={35}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, missingAnchorOk, multiMonitorRippleOk, mmLRNewPx, mmRLNewPx, mmTBNewPx, mmBTNewPx, mmNearOldPx, mmNearNewPx, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !trimRecoverOk || !missingAnchorOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !trimRecoverOk || !missingAnchorOk || !multiMonitorRippleOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || !ulwOk || !ridOk)
                     {
                         return 1;
                     }
@@ -4296,6 +4542,48 @@ namespace BibataIceTrail
                 }
                 return 2;
             }
+        }
+
+        private static unsafe int CountVisiblePixelsNear(
+            TrailRenderer renderer,
+            int bx,
+            int by,
+            int bw,
+            int bh,
+            int targetX,
+            int targetY,
+            int radius,
+            ref int alphaViolations)
+        {
+            if (renderer.DibBits == IntPtr.Zero || bw <= 0 || bh <= 0) return 0;
+            int x0 = targetX - radius;
+            int y0 = targetY - radius;
+            int x1 = targetX + radius;
+            int y1 = targetY + radius;
+            if (x0 < bx) x0 = bx;
+            if (y0 < by) y0 = by;
+            if (x1 >= bx + bw) x1 = bx + bw - 1;
+            if (y1 >= by + bh) y1 = by + bh - 1;
+            if (x0 > x1 || y0 > y1) return 0;
+
+            int count = 0;
+            uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+            int stride = renderer.DibWidth;
+            for (int sy = y0; sy <= y1; sy++)
+            {
+                uint* row = dibBase + (sy - by) * stride;
+                for (int sx = x0; sx <= x1; sx++)
+                {
+                    uint px = row[sx - bx];
+                    byte a = (byte)(px >> 24);
+                    byte r = (byte)((px >> 16) & 0xFF);
+                    byte g = (byte)((px >> 8) & 0xFF);
+                    byte b = (byte)(px & 0xFF);
+                    if (a > 0) count++;
+                    if (r > a || g > a || b > a) alphaViolations++;
+                }
+            }
+            return count;
         }
     }
 }
