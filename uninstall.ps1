@@ -19,6 +19,21 @@ function Normalize-BibataPath([string]$p) {
     }
 }
 
+function Get-BibataCommandExePath([string]$cmd) {
+    if ([string]::IsNullOrWhiteSpace($cmd)) { return "" }
+    $t = $cmd.Trim()
+    if ($t.StartsWith('"')) {
+        $endIdx = $t.IndexOf('"', 1)
+        if ($endIdx -gt 1) {
+            return $t.Substring(1, $endIdx - 1)
+        }
+    }
+    if ($t -match '^(?i)(.+?\.exe)(?:\s+|$)') {
+        return $Matches[1]
+    }
+    return ($t -split '\s+')[0]
+}
+
 function Refresh-WindowsCursors {
     Add-Type -TypeDefinition @"
 using System;
@@ -78,20 +93,35 @@ function Restore-CursorState($cursorsPath, $prevState) {
     if ($null -ne $prevState.defaultScheme) {
         Set-ItemProperty -Path $cursorsPath -Name "(Default)" -Value ([string]$prevState.defaultScheme) -Type String
     }
+    else {
+        Remove-ItemProperty -Path $cursorsPath -Name "(Default)" -ErrorAction SilentlyContinue
+    }
     if ($null -ne $prevState.schemeSource) {
         Set-ItemProperty -Path $cursorsPath -Name "Scheme Source" -Value ([int]$prevState.schemeSource) -Type DWord
     }
+    else {
+        Remove-ItemProperty -Path $cursorsPath -Name "Scheme Source" -ErrorAction SilentlyContinue
+    }
     if ($prevState.roles) {
-        foreach ($prop in $prevState.roles.PSObject.Properties) {
-            $roleName = $prop.Name
-            $roleVal = $prop.Value
-            if ($null -eq $roleVal) {
-                Remove-ItemProperty -Path $cursorsPath -Name $roleName -ErrorAction SilentlyContinue
+        $pairs = New-Object System.Collections.Generic.List[object]
+        if ($prevState.roles -is [System.Collections.IDictionary]) {
+            foreach ($roleName in $prevState.roles.Keys) {
+                $pairs.Add([pscustomobject]@{ Name = [string]$roleName; Value = $prevState.roles[$roleName] })
+            }
+        }
+        else {
+            foreach ($prop in $prevState.roles.PSObject.Properties) {
+                $pairs.Add([pscustomobject]@{ Name = [string]$prop.Name; Value = $prop.Value })
+            }
+        }
+        foreach ($pair in $pairs) {
+            if ($null -eq $pair.Value) {
+                Remove-ItemProperty -Path $cursorsPath -Name $pair.Name -ErrorAction SilentlyContinue
             }
             else {
-                $valStr = [string]$roleVal
+                $valStr = [string]$pair.Value
                 $regType = if ($valStr -like "*%*") { "ExpandString" } else { "String" }
-                Set-ItemProperty -Path $cursorsPath -Name $roleName -Value $valStr -Type $regType
+                Set-ItemProperty -Path $cursorsPath -Name $pair.Name -Value $valStr -Type $regType
             }
         }
     }
@@ -139,9 +169,9 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
 
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
 $manifest = $null
-if (Test-Path $manifestPath) {
+if (Test-Path -LiteralPath $manifestPath) {
     try {
-        $manifest = Get-Content -Path $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     }
     catch {
         $manifest = $null
@@ -155,22 +185,32 @@ $trailExe = if ($manifest -and -not [string]::IsNullOrWhiteSpace($manifest.trail
 else {
     Join-Path $trailDir "BibataIceTrail.exe"
 }
+$shouldManageTrail = (-not $manifest) -or ([bool]$manifest.managedTrail)
 
-# 1. Stop only our BibataIceTrail instance and remove matching auto-start entry
-Stop-BibataProcessesByExe $trailExe
-Start-Sleep -Milliseconds 300
+# 1. Stop only this installation's BibataIceTrail instance and clean matching auto-start entry
+if ($shouldManageTrail) {
+    Stop-BibataProcessesByExe $trailExe
+    Start-Sleep -Milliseconds 300
 
-$runKey = Join-Path $RegistryRoot "Software\Microsoft\Windows\CurrentVersion\Run"
-if (Test-Path $runKey) {
-    $runItem = Get-ItemProperty -Path $runKey -Name "BibataIceTrail" -ErrorAction SilentlyContinue
-    if ($runItem) {
-        $runVal = [string]$runItem.BibataIceTrail
-        if (-not $manifest -or $manifest.autoStartManaged -or ((Normalize-BibataPath $runVal) -eq (Normalize-BibataPath $trailExe))) {
-            Remove-ItemProperty -Path $runKey -Name "BibataIceTrail" -ErrorAction SilentlyContinue
+    $runKey = Join-Path $RegistryRoot "Software\Microsoft\Windows\CurrentVersion\Run"
+    if (Test-Path $runKey) {
+        $runRegItem = Get-Item -Path $runKey -ErrorAction SilentlyContinue
+        if ($runRegItem) {
+            $runVal = $runRegItem.GetValue("BibataIceTrail", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($null -ne $runVal) {
+                $runCmdStr = [Environment]::ExpandEnvironmentVariables([string]$runVal)
+                $runExePath = Get-BibataCommandExePath $runCmdStr
+                if ((Normalize-BibataPath $runExePath) -eq (Normalize-BibataPath $trailExe)) {
+                    Remove-ItemProperty -Path $runKey -Name "BibataIceTrail" -ErrorAction SilentlyContinue
+                }
+                else {
+                    Write-Host "Run entry points to another installation ($runVal); preserving it." -ForegroundColor Yellow
+                }
+            }
         }
     }
+    Write-Host "Stopped BibataIceTrail and checked auto-start entry." -ForegroundColor Green
 }
-Write-Host "Stopped BibataIceTrail and cleaned matching auto-start entry." -ForegroundColor Green
 
 # 2. Restore cursors and clean schemes according to manifest ownership
 $cursorsKey = Join-Path $RegistryRoot "Control Panel\Cursors"
@@ -195,15 +235,30 @@ if ($manifest) {
     else {
         $managedDirs = @()
         if ($manifest.managedThemeDirs) { $managedDirs = @($manifest.managedThemeDirs) }
+        $managedCursorDirs = @()
+        if ($manifest.managedCursorDirs) { $managedCursorDirs = @($manifest.managedCursorDirs) }
+        $managedCursorFiles = @()
+        if ($manifest.managedCursorFiles) { $managedCursorFiles = @($manifest.managedCursorFiles) }
         $managedSchemes = @()
         if ($manifest.managedSchemes) { $managedSchemes = @($manifest.managedSchemes) }
+        $hasFileManifest = ($null -ne $manifest.PSObject.Properties["managedCursorFiles"])
 
-        # Fallback root check when managedDirs was empty (e.g., reused existing Bibata dir)
+        $managedFileNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($mf in $managedCursorFiles) {
+            $normMf = Normalize-BibataPath ([string]$mf)
+            if (-not [string]::IsNullOrEmpty($normMf)) {
+                $managedFileNormSet.Add($normMf) | Out-Null
+            }
+        }
+
         $possibleBibataDirs = @(
             (Join-Path $InstallDir "Bibata-Modern-Ice"),
             (Join-Path $InstallDir "Bibata-Original-Ice")
         )
-        $stillUsingOurs = (Test-PathUnderAny $currentArrow $managedDirs) -or
+        $normCurArrow = Normalize-BibataPath $currentArrow
+        $stillUsingOurs = ($managedFileNormSet.Contains($normCurArrow)) -or
+            (Test-PathUnderAny $currentArrow $managedCursorDirs) -or
+            (Test-PathUnderAny $currentArrow $managedDirs) -or
             (($managedSchemes -contains $currentDefault) -and (Test-PathUnderAny $currentArrow $possibleBibataDirs))
 
         if ($stillUsingOurs) {
@@ -229,16 +284,50 @@ if ($manifest) {
                 if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
                 $valStr = [string]$p.Value
                 $firstPath = ($valStr -split ',')[0]
-                if ((Test-PathUnderAny $firstPath $managedDirs) -or (($managedSchemes -contains $p.Name) -and (Test-PathUnderAny $firstPath $possibleBibataDirs))) {
+                $normFirst = Normalize-BibataPath $firstPath
+                $isManagedScheme = ($managedFileNormSet.Contains($normFirst)) -or
+                    (Test-PathUnderAny $firstPath $managedCursorDirs) -or
+                    (Test-PathUnderAny $firstPath $managedDirs) -or
+                    (($managedSchemes -contains $p.Name) -and (Test-PathUnderAny $firstPath $possibleBibataDirs))
+                if ($isManagedScheme) {
                     Remove-ItemProperty -Path $schemesKey -Name $p.Name -ErrorAction SilentlyContinue
                 }
             }
         }
 
         if (-not $KeepFiles) {
-            foreach ($md in $managedDirs) {
-                if (-not [string]::IsNullOrWhiteSpace($md) -and (Test-Path $md)) {
-                    Remove-Item -Path $md -Recurse -Force -ErrorAction SilentlyContinue
+            if ($hasFileManifest) {
+                foreach ($mf in $managedCursorFiles) {
+                    $mfStr = [string]$mf
+                    if (-not [string]::IsNullOrWhiteSpace($mfStr) -and (Test-Path -LiteralPath $mfStr -PathType Leaf)) {
+                        Remove-Item -LiteralPath $mfStr -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                $dirsToCheck = New-Object System.Collections.Generic.List[string]
+                foreach ($d in $managedCursorDirs) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$d)) { $dirsToCheck.Add([string]$d) }
+                }
+                foreach ($d in $managedDirs) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$d) -and -not ($dirsToCheck -contains [string]$d)) {
+                        $dirsToCheck.Add([string]$d)
+                    }
+                }
+                $sortedDirs = @($dirsToCheck | Sort-Object { $_.Length } -Descending)
+                foreach ($md in $sortedDirs) {
+                    if (Test-Path -LiteralPath $md -PathType Container) {
+                        $remItems = @(Get-ChildItem -LiteralPath $md -Force -ErrorAction SilentlyContinue)
+                        if ($remItems.Count -eq 0) {
+                            Remove-Item -LiteralPath $md -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+            else {
+                # Legacy v1 manifest
+                foreach ($md in $managedDirs) {
+                    if (-not [string]::IsNullOrWhiteSpace($md) -and (Test-Path -LiteralPath $md)) {
+                        Remove-Item -LiteralPath $md -Recurse -Force -ErrorAction SilentlyContinue
+                    }
                 }
             }
         }
@@ -274,7 +363,7 @@ else {
 
     if (-not $KeepFiles) {
         foreach ($ld in $legacyDirs) {
-            if (Test-Path $ld) {
+            if (Test-Path -LiteralPath $ld) {
                 Write-Host "Preserving unowned cursor folder without manifest: $ld (remove manually if unneeded)." -ForegroundColor Yellow
             }
         }
@@ -283,17 +372,16 @@ else {
 
 # 3. Clean up managed trail files and manifest
 if (-not $KeepFiles) {
-    $shouldRemoveTrail = (-not $manifest) -or ([bool]$manifest.managedTrail)
-    if ($shouldRemoveTrail -and (Test-Path $trailDir)) {
-        Remove-Item -Path $trailDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($shouldManageTrail -and (Test-Path -LiteralPath $trailDir)) {
+        Remove-Item -LiteralPath $trailDir -Recurse -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path $manifestPath) {
-        Remove-Item -Path $manifestPath -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $manifestPath) {
+        Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
     }
-    if (Test-Path $InstallDir) {
-        $remaining = Get-ChildItem -Path $InstallDir -ErrorAction SilentlyContinue
-        if (-not $remaining) {
-            Remove-Item -Path $InstallDir -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $InstallDir) {
+        $remaining = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) {
+            Remove-Item -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue
         }
     }
     Write-Host "Cleaned up managed files under $InstallDir." -ForegroundColor Green
