@@ -178,6 +178,63 @@ function Test-SchemeValueValid([string]$schemeVal) {
     return $true
 }
 
+function Test-IsBibataSchemeName([string]$name) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return $false }
+    return ($name -match '^(?i)Bibata-(?:Modern|Original)-Ice \((?:Regular|Large|Extra-Large)\)$')
+}
+
+function Test-PathOwnedByInstall([string]$candidatePath, $fileNormSet, [string[]]$cursorDirs, [string[]]$themeDirs, [string[]]$fallbackDirs, [bool]$allowFallback) {
+    if ([string]::IsNullOrWhiteSpace($candidatePath)) { return $false }
+    $expanded = [Environment]::ExpandEnvironmentVariables($candidatePath.Trim())
+    $normCand = Normalize-BibataPath $expanded
+    if ([string]::IsNullOrEmpty($normCand)) { return $false }
+    if ($fileNormSet -and $fileNormSet.Contains($normCand)) { return $true }
+    if (Test-PathUnderAny $expanded $cursorDirs) { return $true }
+    if (Test-PathUnderAny $expanded $themeDirs) { return $true }
+    if ($allowFallback -and (Test-PathUnderAny $expanded $fallbackDirs)) { return $true }
+    return $false
+}
+
+function Try-RemoveFileStrict([string]$filePath, $failedList) {
+    if ([string]::IsNullOrWhiteSpace($filePath) -or -not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+        return $true
+    }
+    try {
+        Remove-Item -LiteralPath $filePath -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $filePath -PathType Leaf) {
+            $failedList.Add([pscustomobject]@{ Path = $filePath; Reason = "File still exists after removal attempt." })
+            return $false
+        }
+        return $true
+    }
+    catch {
+        $failedList.Add([pscustomobject]@{ Path = $filePath; Reason = $_.Exception.Message })
+        return $false
+    }
+}
+
+function Try-RemoveEmptyDirStrict([string]$dirPath, $failedList) {
+    if ([string]::IsNullOrWhiteSpace($dirPath) -or -not (Test-Path -LiteralPath $dirPath -PathType Container)) {
+        return $true
+    }
+    $rem = @(Get-ChildItem -LiteralPath $dirPath -Force -ErrorAction SilentlyContinue)
+    if ($rem.Count -gt 0) {
+        return $false
+    }
+    try {
+        Remove-Item -LiteralPath $dirPath -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $dirPath -PathType Container) {
+            $failedList.Add([pscustomobject]@{ Path = $dirPath; Reason = "Directory still exists after removal attempt." })
+            return $false
+        }
+        return $true
+    }
+    catch {
+        $failedList.Add([pscustomobject]@{ Path = $dirPath; Reason = $_.Exception.Message })
+        return $false
+    }
+}
+
 function Restore-WindowsDefaultCursors([string]$cursorsPath) {
     if (-not (Test-Path $cursorsPath)) { return }
     Set-ItemProperty -Path $cursorsPath -Name "(Default)" -Value "" -Type String
@@ -268,8 +325,14 @@ if ($shouldManageTrail) {
 $cursorsKey = Join-Path $RegistryRoot "Control Panel\Cursors"
 $schemesKey = Join-Path $RegistryRoot "Control Panel\Cursors\Schemes"
 
+$cursorRoles = @(
+    "Arrow", "Help", "AppStarting", "Wait", "Crosshair", "IBeam",
+    "NWPen", "No", "SizeNS", "SizeWE", "SizeNWSE", "SizeNESW",
+    "SizeAll", "UpArrow", "Hand", "Pin", "Person"
+)
 $currentArrow = ""
 $currentDefault = ""
+$currentActiveRoles = [ordered]@{}
 if (Test-Path $cursorsKey) {
     $curItem = Get-Item -Path $cursorsKey -ErrorAction SilentlyContinue
     if ($curItem) {
@@ -277,8 +340,21 @@ if (Test-Path $cursorsKey) {
         if ($null -ne $aVal) { $currentArrow = [string]$aVal }
         $dVal = $curItem.GetValue("", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
         if ($null -ne $dVal) { $currentDefault = [string]$dVal }
+        foreach ($rName in $cursorRoles) {
+            $rv = $curItem.GetValue($rName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($null -ne $rv -and -not [string]::IsNullOrWhiteSpace([string]$rv)) {
+                $currentActiveRoles[$rName] = [string]$rv
+            }
+        }
     }
 }
+
+$failedDeletions = New-Object System.Collections.Generic.List[object]
+$remainingManagedCursorFiles = New-Object System.Collections.Generic.List[string]
+$remainingManagedCursorDirs = New-Object System.Collections.Generic.List[string]
+$remainingManagedThemeDirs = New-Object System.Collections.Generic.List[string]
+$retryUseV1Manifest = $false
+$trailHasRemaining = $false
 
 if ($manifest) {
     if (-not [bool]$manifest.managedCursor) {
@@ -307,11 +383,17 @@ if ($manifest) {
             (Join-Path $InstallDir "Bibata-Modern-Ice"),
             (Join-Path $InstallDir "Bibata-Original-Ice")
         )
-        $normCurArrow = Normalize-BibataPath $currentArrow
-        $stillUsingOurs = ($managedFileNormSet.Contains($normCurArrow)) -or
-            (Test-PathUnderAny $currentArrow $managedCursorDirs) -or
-            (Test-PathUnderAny $currentArrow $managedDirs) -or
-            (($managedSchemes -contains $currentDefault) -and (Test-PathUnderAny $currentArrow $possibleBibataDirs))
+        $isBibataDefaultName = ($managedSchemes -contains $currentDefault) -or (Test-IsBibataSchemeName $currentDefault)
+        $allowFallback = ($managedSchemes -contains $currentDefault) -or $isBibataDefaultName
+        $arrowOwned = Test-PathOwnedByInstall $currentArrow $managedFileNormSet $managedCursorDirs $managedDirs $possibleBibataDirs $allowFallback
+        $allActiveRolesOwned = $true
+        foreach ($rKey in $currentActiveRoles.Keys) {
+            if (-not (Test-PathOwnedByInstall $currentActiveRoles[$rKey] $managedFileNormSet $managedCursorDirs $managedDirs $possibleBibataDirs $allowFallback)) {
+                $allActiveRolesOwned = $false
+                break
+            }
+        }
+        $stillUsingOurs = $isBibataDefaultName -and $arrowOwned -and $allActiveRolesOwned
 
         if ($stillUsingOurs) {
             if (Test-CursorStateValid $manifest.previousCursorState) {
@@ -332,7 +414,7 @@ if ($manifest) {
             }
         }
         else {
-            Write-Host "Current cursor scheme was changed by user ($currentDefault); keeping current cursor settings." -ForegroundColor Yellow
+            Write-Host "Current cursor scheme was customized or changed by user ($currentDefault); keeping current cursor settings." -ForegroundColor Yellow
         }
 
         $schemeRecordMap = @{}
@@ -378,8 +460,23 @@ if ($manifest) {
                         }
                     }
                     else {
+                        $existingRec = $schemeRecordMap[$existingKey]
+                        $prevMatchedManifestWritten = $false
+                        if ([bool]$rtItem.existedBefore) {
+                            foreach ($mwv in $existingRec.writtenValues) {
+                                if ([string]::Equals([string]$rtItem.previousValue, [string]$mwv, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $prevMatchedManifestWritten = $true
+                                    break
+                                }
+                            }
+                        }
+                        if (-not $prevMatchedManifestWritten) {
+                            $existingRec.existedBefore = [bool]$rtItem.existedBefore
+                            $existingRec.previousValue = $rtItem.previousValue
+                            $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$rtItem.previousKind)) { "String" } else { [string]$rtItem.previousKind }
+                        }
                         if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
-                            $schemeRecordMap[$existingKey].writtenValues.Add([string]$rtItem.writtenValue)
+                            $existingRec.writtenValues.Add([string]$rtItem.writtenValue)
                         }
                     }
                 }
@@ -432,14 +529,22 @@ if ($manifest) {
                         }
                     }
                     else {
-                        $firstPath = ($rawVal -split ',')[0]
-                        $normFirst = Normalize-BibataPath $firstPath
-                        $isManagedScheme = ($managedFileNormSet.Contains($normFirst)) -or
-                            (Test-PathUnderAny $firstPath $managedCursorDirs) -or
-                            (Test-PathUnderAny $firstPath $managedDirs) -or
-                            (($managedSchemes -contains $valName) -and (Test-PathUnderAny $firstPath $possibleBibataDirs))
-                        if ($isManagedScheme) {
-                            Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
+                        $isBibataSchemeName = ($managedSchemes -contains $valName) -or (Test-IsBibataSchemeName $valName)
+                        if ($isBibataSchemeName) {
+                            $parts = $rawVal -split ','
+                            $nonEmptyCount = 0
+                            $allOwned = $true
+                            foreach ($pt in $parts) {
+                                if ([string]::IsNullOrWhiteSpace($pt)) { continue }
+                                $nonEmptyCount++
+                                if (-not (Test-PathOwnedByInstall $pt $managedFileNormSet $managedCursorDirs $managedDirs $possibleBibataDirs ($managedSchemes -contains $valName))) {
+                                    $allOwned = $false
+                                    break
+                                }
+                            }
+                            if ($nonEmptyCount -gt 0 -and $allOwned) {
+                                Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
+                            }
                         }
                     }
                 }
@@ -451,7 +556,9 @@ if ($manifest) {
                 foreach ($mf in $managedCursorFiles) {
                     $mfStr = [string]$mf
                     if (-not [string]::IsNullOrWhiteSpace($mfStr) -and (Test-Path -LiteralPath $mfStr -PathType Leaf)) {
-                        Remove-Item -LiteralPath $mfStr -Force -ErrorAction SilentlyContinue
+                        if (-not (Try-RemoveFileStrict $mfStr $failedDeletions)) {
+                            $remainingManagedCursorFiles.Add($mfStr)
+                        }
                     }
                 }
                 $dirsToCheck = New-Object System.Collections.Generic.List[string]
@@ -468,7 +575,23 @@ if ($manifest) {
                     if (Test-Path -LiteralPath $md -PathType Container) {
                         $remItems = @(Get-ChildItem -LiteralPath $md -Force -ErrorAction SilentlyContinue)
                         if ($remItems.Count -eq 0) {
-                            Remove-Item -LiteralPath $md -Force -ErrorAction SilentlyContinue
+                            if (-not (Try-RemoveEmptyDirStrict $md $failedDeletions)) {
+                                $remainingManagedCursorDirs.Add($md)
+                            }
+                        }
+                        else {
+                            $hasFailedManagedChild = $false
+                            foreach ($rf in $remainingManagedCursorFiles) {
+                                if (Test-PathUnderAny $rf @($md)) { $hasFailedManagedChild = $true; break }
+                            }
+                            if (-not $hasFailedManagedChild) {
+                                foreach ($rd in $remainingManagedCursorDirs) {
+                                    if (Test-PathUnderAny $rd @($md)) { $hasFailedManagedChild = $true; break }
+                                }
+                            }
+                            if ($hasFailedManagedChild) {
+                                $remainingManagedCursorDirs.Add($md)
+                            }
                         }
                     }
                 }
@@ -485,6 +608,7 @@ if ($manifest) {
                 }
                 foreach ($md in $managedDirs) {
                     if ([string]::IsNullOrWhiteSpace($md) -or -not (Test-Path -LiteralPath $md -PathType Container)) { continue }
+                    $mdHadFailure = $false
                     $sizeSubDirs = @(Get-ChildItem -LiteralPath $md -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
                         $_.Name -match '^(?i)Bibata-(?:Modern|Original)-Ice-(?:Regular|Large|Extra-Large)-Windows$'
                     })
@@ -492,20 +616,30 @@ if ($manifest) {
                         $filesInSize = @(Get-ChildItem -LiteralPath $sd.FullName -File -Force -ErrorAction SilentlyContinue)
                         foreach ($f in $filesInSize) {
                             if ($knownBibataFiles.Contains($f.Name)) {
-                                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                                if (-not (Try-RemoveFileStrict $f.FullName $failedDeletions)) {
+                                    $mdHadFailure = $true
+                                }
                             }
                         }
                         $remSize = @(Get-ChildItem -LiteralPath $sd.FullName -Force -ErrorAction SilentlyContinue)
                         if ($remSize.Count -eq 0) {
-                            Remove-Item -LiteralPath $sd.FullName -Force -ErrorAction SilentlyContinue
+                            if (-not (Try-RemoveEmptyDirStrict $sd.FullName $failedDeletions)) {
+                                $mdHadFailure = $true
+                            }
                         }
                     }
                     $remTheme = @(Get-ChildItem -LiteralPath $md -Force -ErrorAction SilentlyContinue)
                     if ($remTheme.Count -eq 0) {
-                        Remove-Item -LiteralPath $md -Force -ErrorAction SilentlyContinue
+                        if (-not (Try-RemoveEmptyDirStrict $md $failedDeletions)) {
+                            $mdHadFailure = $true
+                        }
                     }
                     else {
                         Write-Host "Preserving non-empty theme directory with unknown/user files (v1 manifest): $md" -ForegroundColor Yellow
+                    }
+                    if ($mdHadFailure) {
+                        $remainingManagedThemeDirs.Add($md)
+                        $retryUseV1Manifest = $true
                     }
                 }
             }
@@ -518,7 +652,17 @@ else {
         (Join-Path $InstallDir "Bibata-Modern-Ice"),
         (Join-Path $InstallDir "Bibata-Original-Ice")
     )
-    if (Test-PathUnderAny $currentArrow $legacyDirs) {
+    $legacyDefaultOk = [string]::IsNullOrWhiteSpace($currentDefault) -or (Test-IsBibataSchemeName $currentDefault)
+    $legacyAllRolesInDir = ($currentActiveRoles.Count -gt 0) -and (Test-PathUnderAny $currentArrow $legacyDirs)
+    if ($legacyAllRolesInDir) {
+        foreach ($rKey in $currentActiveRoles.Keys) {
+            if (-not (Test-PathUnderAny $currentActiveRoles[$rKey] $legacyDirs)) {
+                $legacyAllRolesInDir = $false
+                break
+            }
+        }
+    }
+    if ($legacyDefaultOk -and $legacyAllRolesInDir) {
         Restore-WindowsDefaultCursors $cursorsKey
         if (-not $SkipCursorRefresh) {
             Refresh-WindowsCursors
@@ -526,16 +670,26 @@ else {
         Write-Host "Restored default Windows mouse pointers (legacy install was active)." -ForegroundColor Green
     }
     else {
-        Write-Host "No install manifest found and active cursors are outside $InstallDir; preserving existing cursor settings." -ForegroundColor Yellow
+        Write-Host "No install manifest found and active cursors are customized or outside $InstallDir; preserving existing cursor settings." -ForegroundColor Yellow
     }
 
     if (Test-Path $schemesKey) {
-        $props = Get-ItemProperty -Path $schemesKey
-        foreach ($p in $props.PSObject.Properties) {
-            if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
-            $firstPath = ([string]$p.Value -split ',')[0]
-            if (Test-PathUnderAny $firstPath $legacyDirs) {
-                Remove-ItemProperty -Path $schemesKey -Name $p.Name -ErrorAction SilentlyContinue
+        $schemesRegItem = Get-Item -Path $schemesKey -ErrorAction SilentlyContinue
+        if ($schemesRegItem) {
+            foreach ($valName in @($schemesRegItem.GetValueNames())) {
+                if ([string]::IsNullOrEmpty($valName)) { continue }
+                if (-not (Test-IsBibataSchemeName $valName)) { continue }
+                $rawVal = [string]$schemesRegItem.GetValue($valName, "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $nonEmptyCount = 0
+                $allLegacy = $true
+                foreach ($pt in ($rawVal -split ',')) {
+                    if ([string]::IsNullOrWhiteSpace($pt)) { continue }
+                    $nonEmptyCount++
+                    if (-not (Test-PathUnderAny $pt $legacyDirs)) { $allLegacy = $false; break }
+                }
+                if ($nonEmptyCount -gt 0 -and $allLegacy) {
+                    Remove-ItemProperty -Path $schemesKey -Name $valName -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -551,15 +705,76 @@ else {
 
 # 3. Clean up managed trail files and manifest
 if (-not $KeepFiles) {
-    if ($shouldManageTrail -and (Test-Path -LiteralPath $trailDir)) {
-        Remove-Item -LiteralPath $trailDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($shouldManageTrail -and (Test-Path -LiteralPath $trailDir -PathType Container)) {
+        $trailFiles = @(Get-ChildItem -LiteralPath $trailDir -File -Recurse -Force -ErrorAction SilentlyContinue)
+        foreach ($tf in $trailFiles) {
+            if (-not (Try-RemoveFileStrict $tf.FullName $failedDeletions)) {
+                $trailHasRemaining = $true
+            }
+        }
+        $trailSubDirs = @(Get-ChildItem -LiteralPath $trailDir -Directory -Recurse -Force -ErrorAction SilentlyContinue | Sort-Object { $_.FullName.Length } -Descending)
+        foreach ($tsd in $trailSubDirs) {
+            if (-not (Try-RemoveEmptyDirStrict $tsd.FullName $failedDeletions)) {
+                $trailHasRemaining = $true
+            }
+        }
+        if (-not (Try-RemoveEmptyDirStrict $trailDir $failedDeletions)) {
+            $trailHasRemaining = $true
+        }
     }
+
+    $rtSchemesCleanup = Join-Path $InstallDir "bibata-runtime-schemes.json"
+    if (Test-Path -LiteralPath $rtSchemesCleanup -PathType Leaf) {
+        Remove-Item -LiteralPath $rtSchemesCleanup -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($failedDeletions.Count -gt 0) {
+        if ($manifest) {
+            $hasRemainingCursor = ($remainingManagedCursorFiles.Count -gt 0) -or ($remainingManagedCursorDirs.Count -gt 0) -or ($remainingManagedThemeDirs.Count -gt 0)
+            if ($retryUseV1Manifest) {
+                $retryManifest = [ordered]@{
+                    schemaVersion       = 1
+                    installDir          = $InstallDir
+                    managedTrail        = $trailHasRemaining
+                    trailExePath        = $trailExe
+                    autoStartManaged    = $false
+                    managedCursor       = $hasRemainingCursor
+                    managedThemeDirs    = @($remainingManagedThemeDirs)
+                    managedSchemes      = @()
+                    previousCursorState = $null
+                    updatedAt           = (Get-Date).ToString("o")
+                }
+            }
+            else {
+                $retryManifest = [ordered]@{
+                    schemaVersion        = 2
+                    installDir           = $InstallDir
+                    managedTrail         = $trailHasRemaining
+                    trailExePath         = $trailExe
+                    autoStartManaged     = $false
+                    managedCursor        = $hasRemainingCursor
+                    managedThemeDirs     = @($remainingManagedThemeDirs)
+                    managedCursorDirs    = @($remainingManagedCursorDirs)
+                    managedCursorFiles   = @($remainingManagedCursorFiles)
+                    managedSchemes       = @()
+                    managedSchemeRecords = [ordered]@{}
+                    previousCursorState  = $null
+                    updatedAt            = (Get-Date).ToString("o")
+                }
+            }
+            Set-Content -LiteralPath $manifestPath -Value ($retryManifest | ConvertTo-Json -Depth 6) -Encoding UTF8
+        }
+
+        $failedListMsg = New-Object System.Collections.Generic.List[string]
+        foreach ($fd in $failedDeletions) {
+            Write-Warning "Failed to delete $($fd.Path): $($fd.Reason)"
+            $failedListMsg.Add("$($fd.Path) ($($fd.Reason))")
+        }
+        throw "Uninstall incomplete: failed to delete $($failedDeletions.Count) file(s)/folder(s): $($failedListMsg -join '; '). Manifest retained for retry after releasing handles."
+    }
+
     if (Test-Path -LiteralPath $manifestPath) {
         Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
-    }
-    $rtSchemesCleanup = Join-Path $InstallDir "bibata-runtime-schemes.json"
-    if (Test-Path -LiteralPath $rtSchemesCleanup) {
-        Remove-Item -LiteralPath $rtSchemesCleanup -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path -LiteralPath $InstallDir) {
         $remaining = @(Get-ChildItem -LiteralPath $InstallDir -Force -ErrorAction SilentlyContinue)

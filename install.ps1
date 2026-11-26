@@ -347,6 +347,39 @@ function Resolve-InheritedCursorState($currentState, [string]$currentInstallDir)
     return $state
 }
 
+function Test-SchemeValueValid([string]$schemeVal) {
+    if ($null -eq $schemeVal) { return $false }
+    if ([string]::IsNullOrWhiteSpace($schemeVal)) { return $true }
+    $parts = $schemeVal -split ','
+    foreach ($part in $parts) {
+        $trimmed = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables($trimmed)
+        if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-AllSchemePathsUnderDir([string]$schemeVal, [string]$dirRoot) {
+    if ([string]::IsNullOrWhiteSpace($schemeVal) -or [string]::IsNullOrWhiteSpace($dirRoot)) { return $false }
+    $normRoot = Normalize-BibataPath $dirRoot
+    if ([string]::IsNullOrEmpty($normRoot)) { return $false }
+    $prefix = $normRoot + "\"
+    $nonEmptyCount = 0
+    foreach ($part in ($schemeVal -split ',')) {
+        $trimmed = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        $nonEmptyCount++
+        $normPart = Normalize-BibataPath ([Environment]::ExpandEnvironmentVariables($trimmed))
+        if (-not ($normPart -eq $normRoot -or $normPart.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
+            return $false
+        }
+    }
+    return ($nonEmptyCount -gt 0)
+}
+
 function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
     if ([string]::IsNullOrWhiteSpace($installRoot) -or $null -eq $targetMap) { return }
     $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
@@ -365,8 +398,18 @@ function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
                     writtenValue  = [string]$item.writtenValue
                 }
             }
-            elseif (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
-                $targetMap[$sName].writtenValue = [string]$item.writtenValue
+            else {
+                $existingRec = $targetMap[$sName]
+                $prevMatchesManifestWritten = ([bool]$item.existedBefore) -and
+                    [string]::Equals([string]$item.previousValue, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
+                if (-not $prevMatchesManifestWritten) {
+                    $existingRec.existedBefore = [bool]$item.existedBefore
+                    $existingRec.previousValue = $item.previousValue
+                    $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
+                    $existingRec.writtenValue = [string]$item.writtenValue
+                }
             }
         }
     }
@@ -744,6 +787,8 @@ try {
     $cursorBackupDir = ""
     $overwrittenCursorBackups = New-Object System.Collections.Generic.List[object]
     $backedUpCursorNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $prunedSchemeRollbacks = New-Object System.Collections.Generic.List[object]
+    $prunedSchemeNames = New-Object System.Collections.Generic.List[string]
     $cursorRegistryApplied = $false
 
     if (-not $SkipCursor) {
@@ -945,6 +990,43 @@ try {
                             Write-Host "Preserving non-empty extra size folder with user files: $extraSizeDir" -ForegroundColor Yellow
                         }
                     }
+
+                    $extraSchemeName = "$themeName ($extraSz)"
+                    if (Test-Path $schemesKey) {
+                        $extraSchemeSnap = Snapshot-RegValue $schemesKey $extraSchemeName
+                        if ($extraSchemeSnap.valExisted) {
+                            if ($managedSchemeRecords.Contains($extraSchemeName)) {
+                                $extraRec = $managedSchemeRecords[$extraSchemeName]
+                                if ([string]::Equals([string]$extraSchemeSnap.value, [string]$extraRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $prunedSchemeRollbacks.Add([pscustomobject]@{ Name = $extraSchemeName; Snapshot = $extraSchemeSnap })
+                                    if ([bool]$extraRec.existedBefore -and (Test-SchemeValueValid ([string]$extraRec.previousValue))) {
+                                        $ek = if ([string]::IsNullOrWhiteSpace([string]$extraRec.previousKind)) { "String" } else { [string]$extraRec.previousKind }
+                                        Set-ItemProperty -Path $schemesKey -Name $extraSchemeName -Value ([string]$extraRec.previousValue) -Type $ek
+                                    }
+                                    else {
+                                        Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction SilentlyContinue
+                                    }
+                                    $managedSchemeRecords.Remove($extraSchemeName)
+                                    for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
+                                        if ([string]::Equals([string]$managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
+                                            $managedSchemes.RemoveAt($si)
+                                        }
+                                    }
+                                    $prunedSchemeNames.Add($extraSchemeName)
+                                }
+                            }
+                            elseif (Test-AllSchemePathsUnderDir ([string]$extraSchemeSnap.value) $extraSizeDir) {
+                                $prunedSchemeRollbacks.Add([pscustomobject]@{ Name = $extraSchemeName; Snapshot = $extraSchemeSnap })
+                                Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction SilentlyContinue
+                                for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
+                                    if ([string]::Equals([string]$managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
+                                        $managedSchemes.RemoveAt($si)
+                                    }
+                                }
+                                $prunedSchemeNames.Add($extraSchemeName)
+                            }
+                        }
+                    }
                 }
             }
 
@@ -990,7 +1072,16 @@ try {
                 }
             }
             else {
-                $managedSchemeRecords[$schemeName].writtenValue = $schemeValueStr
+                $existingRec = $managedSchemeRecords[$schemeName]
+                $stillMatchesOurs = $schemeSnapBefore.valExisted -and
+                    [string]::Equals([string]$schemeSnapBefore.value, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
+                if (-not $stillMatchesOurs) {
+                    $inheritedSchemeSnap = Resolve-InheritedSchemeSnapshot $schemeName $schemeSnapBefore $InstallDir
+                    $existingRec.existedBefore = [bool]$inheritedSchemeSnap.valExisted
+                    $existingRec.previousValue = $inheritedSchemeSnap.value
+                    $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$inheritedSchemeSnap.kind)) { "String" } else { [string]$inheritedSchemeSnap.kind }
+                }
+                $existingRec.writtenValue = $schemeValueStr
             }
 
             Write-Host "Applied cursor scheme: $schemeName" -ForegroundColor Green
@@ -1087,6 +1178,31 @@ try {
         $manifestJson = $manifestObj | ConvertTo-Json -Depth 6
         Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
 
+        if ($prunedSchemeNames.Count -gt 0) {
+            $rtFile = Join-Path $InstallDir "bibata-runtime-schemes.json"
+            if (Test-Path -LiteralPath $rtFile -PathType Leaf) {
+                try {
+                    $rtArr = @(Get-Content -LiteralPath $rtFile -Raw -Encoding UTF8 | ConvertFrom-Json)
+                    $keptRt = @($rtArr | Where-Object {
+                        $n = [string]$_.name
+                        $drop = $false
+                        foreach ($pn in $prunedSchemeNames) {
+                            if ([string]::Equals($n, $pn, [StringComparison]::OrdinalIgnoreCase)) { $drop = $true; break }
+                        }
+                        -not $drop
+                    })
+                    if ($keptRt.Count -eq 0) {
+                        Remove-Item -LiteralPath $rtFile -Force -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        Set-Content -LiteralPath $rtFile -Value (ConvertTo-Json -InputObject $keptRt -Depth 4) -Encoding UTF8
+                    }
+                }
+                catch {
+                }
+            }
+        }
+
         if (-not $SkipTrail) {
             if (Test-Path -LiteralPath $exeBak) { Remove-Item -LiteralPath $exeBak -Force -ErrorAction SilentlyContinue }
             if (Test-Path -LiteralPath $csBak) { Remove-Item -LiteralPath $csBak -Force -ErrorAction SilentlyContinue }
@@ -1154,12 +1270,20 @@ try {
                 try {
                     Restore-CursorState $cursorsKey $cursorsStateBeforeThisRun
                     Restore-RegValue $schemesKey $schemeName $schemeSnapBefore
+                    foreach ($pr in $prunedSchemeRollbacks) {
+                        Restore-RegValue $schemesKey $pr.Name $pr.Snapshot
+                    }
                     if (-not $SkipCursorRefresh) {
                         Refresh-WindowsCursors
                     }
                 }
                 catch {
                     Write-Warning "Failed to rollback cursor registry state: $($_.Exception.Message)"
+                }
+            }
+            elseif ($prunedSchemeRollbacks.Count -gt 0) {
+                foreach ($pr in $prunedSchemeRollbacks) {
+                    try { Restore-RegValue $schemesKey $pr.Name $pr.Snapshot } catch {}
                 }
             }
 

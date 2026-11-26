@@ -3301,6 +3301,7 @@ namespace BibataIceTrail
 
                         if (!alreadyMatches)
                         {
+                            ResolveInheritedSchemeBackup(schemeName, installRoot, ref existedBefore, ref previousKind, ref previousValue);
                             bool backupSaved = !string.IsNullOrEmpty(runtimeBackupPath) &&
                                 TryPersistRuntimeSchemeRecord(runtimeBackupPath, schemeName, existedBefore, previousKind, previousValue, schemeValue);
                             if (backupSaved)
@@ -3371,6 +3372,14 @@ namespace BibataIceTrail
 
                 if (existing != null)
                 {
+                    bool unchangedFromOurWrite = existedBefore &&
+                        string.Equals(previousValue, existing.WrittenValue, StringComparison.OrdinalIgnoreCase);
+                    if (!unchangedFromOurWrite)
+                    {
+                        existing.ExistedBefore = existedBefore;
+                        existing.PreviousKind = string.IsNullOrEmpty(previousKind) ? "String" : previousKind;
+                        existing.PreviousValue = existedBefore ? previousValue : null;
+                    }
                     existing.WrittenValue = writtenValue;
                 }
                 else
@@ -3563,6 +3572,260 @@ namespace BibataIceTrail
                 return false;
             }
             return false;
+        }
+
+        private static string NormalizeDirPath(string p)
+        {
+            if (string.IsNullOrEmpty(p)) return "";
+            try
+            {
+                return Path.GetFullPath(p.Trim().Trim('"')).TrimEnd('\\').ToLowerInvariant();
+            }
+            catch
+            {
+                return p.Trim().Trim('"').TrimEnd('\\').ToLowerInvariant();
+            }
+        }
+
+        internal static void ResolveInheritedSchemeBackup(
+            string schemeName,
+            string currentInstallRoot,
+            ref bool existedBefore,
+            ref string previousKind,
+            ref string previousValue)
+        {
+            if (!existedBefore || string.IsNullOrEmpty(previousValue)) return;
+
+            HashSet<string> visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string curNorm = NormalizeDirPath(currentInstallRoot);
+            if (!string.IsNullOrEmpty(curNorm)) visited.Add(curNorm);
+
+            for (int hop = 0; hop < 5; hop++)
+            {
+                if (!existedBefore || string.IsNullOrEmpty(previousValue)) break;
+
+                int commaIdx = previousValue.IndexOf(',');
+                string firstPath = (commaIdx >= 0 ? previousValue.Substring(0, commaIdx) : previousValue).Trim();
+                if (string.IsNullOrEmpty(firstPath)) break;
+
+                string sizeDir = Path.GetDirectoryName(firstPath);
+                if (string.IsNullOrEmpty(sizeDir)) break;
+                string sizeDirName = Path.GetFileName(sizeDir);
+                if (ParseSizeFromFolderName(sizeDirName) == null) break;
+
+                string themeDir = Path.GetDirectoryName(sizeDir);
+                if (string.IsNullOrEmpty(themeDir)) break;
+                string themeDirName = Path.GetFileName(themeDir);
+                if (!string.Equals(themeDirName, "Bibata-Modern-Ice", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(themeDirName, "Bibata-Original-Ice", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                string otherRoot = Path.GetDirectoryName(themeDir);
+                string otherNorm = NormalizeDirPath(otherRoot);
+                if (string.IsNullOrEmpty(otherNorm) || visited.Contains(otherNorm)) break;
+                visited.Add(otherNorm);
+
+                RuntimeSchemeRecord matchedOther = null;
+                List<RuntimeSchemeRecord> otherRt;
+                string otherRtPath = Path.Combine(otherRoot, "bibata-runtime-schemes.json");
+                if (File.Exists(otherRtPath) && TryLoadRuntimeSchemeRecords(otherRtPath, out otherRt))
+                {
+                    for (int i = 0; i < otherRt.Count; i++)
+                    {
+                        if (string.Equals(otherRt[i].Name, schemeName, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(otherRt[i].WrittenValue, previousValue, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matchedOther = otherRt[i];
+                            break;
+                        }
+                    }
+                }
+
+                if (matchedOther == null)
+                {
+                    string otherManifestPath = Path.Combine(otherRoot, "bibata-ice-glow-manifest.json");
+                    RuntimeSchemeRecord mfRec;
+                    if (File.Exists(otherManifestPath) &&
+                        TryFindManifestSchemeRecord(otherManifestPath, schemeName, out mfRec) &&
+                        string.Equals(mfRec.WrittenValue, previousValue, StringComparison.OrdinalIgnoreCase))
+                    {
+                        matchedOther = mfRec;
+                    }
+                }
+
+                if (matchedOther == null) break;
+
+                existedBefore = matchedOther.ExistedBefore;
+                previousKind = string.IsNullOrEmpty(matchedOther.PreviousKind) ? "String" : matchedOther.PreviousKind;
+                previousValue = matchedOther.ExistedBefore ? matchedOther.PreviousValue : null;
+            }
+        }
+
+        internal static bool TryFindManifestSchemeRecord(string manifestPath, string schemeName, out RuntimeSchemeRecord record)
+        {
+            record = null;
+            try
+            {
+                if (!File.Exists(manifestPath)) return false;
+                string json = File.ReadAllText(manifestPath, Encoding.UTF8);
+                int pos = 0;
+                SkipJsonWs(json, ref pos);
+                if (pos >= json.Length || json[pos] != '{') return false;
+                pos++;
+                SkipJsonWs(json, ref pos);
+                while (pos < json.Length && json[pos] != '}')
+                {
+                    string key;
+                    if (!ReadJsonString(json, ref pos, out key)) return false;
+                    SkipJsonWs(json, ref pos);
+                    if (pos >= json.Length || json[pos] != ':') return false;
+                    pos++;
+                    SkipJsonWs(json, ref pos);
+
+                    if (string.Equals(key, "managedSchemeRecords", StringComparison.OrdinalIgnoreCase) &&
+                        pos < json.Length && json[pos] == '{')
+                    {
+                        pos++;
+                        SkipJsonWs(json, ref pos);
+                        while (pos < json.Length && json[pos] != '}')
+                        {
+                            string sKey;
+                            if (!ReadJsonString(json, ref pos, out sKey)) return false;
+                            SkipJsonWs(json, ref pos);
+                            if (pos >= json.Length || json[pos] != ':') return false;
+                            pos++;
+                            SkipJsonWs(json, ref pos);
+
+                            if (string.Equals(sKey, schemeName, StringComparison.OrdinalIgnoreCase) &&
+                                pos < json.Length && json[pos] == '{')
+                            {
+                                pos++;
+                                RuntimeSchemeRecord rec = new RuntimeSchemeRecord();
+                                rec.Name = sKey;
+                                rec.PreviousKind = "String";
+                                SkipJsonWs(json, ref pos);
+                                while (pos < json.Length && json[pos] != '}')
+                                {
+                                    string fk;
+                                    if (!ReadJsonString(json, ref pos, out fk)) return false;
+                                    SkipJsonWs(json, ref pos);
+                                    if (pos >= json.Length || json[pos] != ':') return false;
+                                    pos++;
+                                    SkipJsonWs(json, ref pos);
+                                    if (string.Equals(fk, "existedBefore", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        bool bv;
+                                        if (!ReadJsonBool(json, ref pos, out bv)) return false;
+                                        rec.ExistedBefore = bv;
+                                    }
+                                    else if (string.Equals(fk, "previousKind", StringComparison.OrdinalIgnoreCase) ||
+                                             string.Equals(fk, "previousValue", StringComparison.OrdinalIgnoreCase) ||
+                                             string.Equals(fk, "writtenValue", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        string sv;
+                                        if (!ReadJsonStringOrNull(json, ref pos, out sv)) return false;
+                                        if (string.Equals(fk, "previousKind", StringComparison.OrdinalIgnoreCase)) rec.PreviousKind = sv ?? "String";
+                                        else if (string.Equals(fk, "previousValue", StringComparison.OrdinalIgnoreCase)) rec.PreviousValue = sv;
+                                        else if (string.Equals(fk, "writtenValue", StringComparison.OrdinalIgnoreCase)) rec.WrittenValue = sv;
+                                    }
+                                    else
+                                    {
+                                        if (!SkipJsonValue(json, ref pos)) return false;
+                                    }
+                                    SkipJsonWs(json, ref pos);
+                                    if (pos < json.Length && json[pos] == ',') { pos++; SkipJsonWs(json, ref pos); }
+                                    else if (pos < json.Length && json[pos] == '}') break;
+                                    else return false;
+                                }
+                                record = rec;
+                                return true;
+                            }
+                            else
+                            {
+                                if (!SkipJsonValue(json, ref pos)) return false;
+                            }
+                            SkipJsonWs(json, ref pos);
+                            if (pos < json.Length && json[pos] == ',') { pos++; SkipJsonWs(json, ref pos); }
+                            else if (pos < json.Length && json[pos] == '}') break;
+                            else return false;
+                        }
+                        return false;
+                    }
+                    else
+                    {
+                        if (!SkipJsonValue(json, ref pos)) return false;
+                    }
+                    SkipJsonWs(json, ref pos);
+                    if (pos < json.Length && json[pos] == ',') { pos++; SkipJsonWs(json, ref pos); }
+                    else if (pos < json.Length && json[pos] == '}') break;
+                    else return false;
+                }
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool SkipJsonValue(string s, ref int pos)
+        {
+            SkipJsonWs(s, ref pos);
+            if (pos >= s.Length) return false;
+            char ch = s[pos];
+            if (ch == '"')
+            {
+                string ignored;
+                return ReadJsonString(s, ref pos, out ignored);
+            }
+            if (ch == '{')
+            {
+                pos++;
+                SkipJsonWs(s, ref pos);
+                if (pos < s.Length && s[pos] == '}') { pos++; return true; }
+                while (pos < s.Length)
+                {
+                    string k;
+                    if (!ReadJsonString(s, ref pos, out k)) return false;
+                    SkipJsonWs(s, ref pos);
+                    if (pos >= s.Length || s[pos] != ':') return false;
+                    pos++;
+                    if (!SkipJsonValue(s, ref pos)) return false;
+                    SkipJsonWs(s, ref pos);
+                    if (pos < s.Length && s[pos] == ',') { pos++; SkipJsonWs(s, ref pos); continue; }
+                    if (pos < s.Length && s[pos] == '}') { pos++; return true; }
+                    return false;
+                }
+                return false;
+            }
+            if (ch == '[')
+            {
+                pos++;
+                SkipJsonWs(s, ref pos);
+                if (pos < s.Length && s[pos] == ']') { pos++; return true; }
+                while (pos < s.Length)
+                {
+                    if (!SkipJsonValue(s, ref pos)) return false;
+                    SkipJsonWs(s, ref pos);
+                    if (pos < s.Length && s[pos] == ',') { pos++; SkipJsonWs(s, ref pos); continue; }
+                    if (pos < s.Length && s[pos] == ']') { pos++; return true; }
+                    return false;
+                }
+                return false;
+            }
+            if (pos + 4 <= s.Length && string.CompareOrdinal(s, pos, "true", 0, 4) == 0) { pos += 4; return true; }
+            if (pos + 5 <= s.Length && string.CompareOrdinal(s, pos, "false", 0, 5) == 0) { pos += 5; return true; }
+            if (pos + 4 <= s.Length && string.CompareOrdinal(s, pos, "null", 0, 4) == 0) { pos += 4; return true; }
+            int start = pos;
+            while (pos < s.Length)
+            {
+                char nc = s[pos];
+                if ((nc >= '0' && nc <= '9') || nc == '-' || nc == '+' || nc == '.' || nc == 'e' || nc == 'E') pos++;
+                else break;
+            }
+            return pos > start;
         }
 
         private static void SkipJsonWs(string s, ref int pos)
