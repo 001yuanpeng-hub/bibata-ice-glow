@@ -564,6 +564,7 @@ if (Test-Path -LiteralPath $manifestPath) {
 
 $managedCursor = $false
 $managedTrail = $false
+$managedTrailFiles = New-Object System.Collections.Generic.List[string]
 $managedThemeDirs = New-Object System.Collections.Generic.List[string]
 $managedCursorDirs = New-Object System.Collections.Generic.List[string]
 $managedCursorFiles = New-Object System.Collections.Generic.List[string]
@@ -578,6 +579,9 @@ if ($prevManifest) {
     if ($prevManifest.managedTrail) { $managedTrail = $true }
     if ($prevManifest.autoStartManaged) { $autoStartManaged = $true }
     if (-not [string]::IsNullOrWhiteSpace($prevManifest.trailExePath)) { $prevTrailExePath = [string]$prevManifest.trailExePath }
+    if ($prevManifest.managedTrailFiles) {
+        foreach ($tf in $prevManifest.managedTrailFiles) { Add-UniquePath $managedTrailFiles ([string]$tf) }
+    }
     if ($prevManifest.managedThemeDirs) {
         foreach ($d in $prevManifest.managedThemeDirs) { Add-UniquePath $managedThemeDirs ([string]$d) }
     }
@@ -1158,6 +1162,11 @@ try {
 
             $managedTrail = $true
             $prevTrailExePath = $destExe
+            Add-UniquePath $managedTrailFiles $destExe
+            Add-UniquePath $managedTrailFiles $destCs
+            if ($cfgModified -or (Test-Path -LiteralPath $cfgPath -PathType Leaf)) {
+                Add-UniquePath $managedTrailFiles $cfgPath
+            }
         }
 
         $manifestObj = [ordered]@{
@@ -1165,6 +1174,7 @@ try {
             installDir           = $InstallDir
             managedTrail         = $managedTrail
             trailExePath         = $prevTrailExePath
+            managedTrailFiles    = @($managedTrailFiles)
             autoStartManaged     = $autoStartManaged
             managedCursor        = $managedCursor
             managedThemeDirs     = @($managedThemeDirs)
