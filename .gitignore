@@ -1,0 +1,7 @@
+*.exe
+*.pdb
+*.log
+config.ini
+Bibata-*-Ice*/
+Bibata-Ice-Trail/
+demo_frames/
