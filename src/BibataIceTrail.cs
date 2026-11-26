@@ -25,7 +25,8 @@ namespace BibataIceTrail
     {
         Ice = 0,
         Cyan = 1,
-        Frost = 2
+        Frost = 2,
+        Custom = 3
     }
 
     internal struct TrailPreset
@@ -75,8 +76,12 @@ namespace BibataIceTrail
         public bool Enabled;
         public bool TrailEnabled;
         public bool ClickRippleEnabled;
+        public bool DragGlowEnabled;
+        public bool ShakeLocateEnabled;
+        public bool HotkeyEnabled;
         public PresetKind Preset;
         public PaletteKind Palette;
+        public string CustomColorHex;
         public bool AutoPauseFullscreen;
 
         private readonly string _path;
@@ -87,8 +92,12 @@ namespace BibataIceTrail
             Enabled = true;
             TrailEnabled = true;
             ClickRippleEnabled = true;
+            DragGlowEnabled = true;
+            ShakeLocateEnabled = true;
+            HotkeyEnabled = true;
             Preset = PresetKind.Standard;
             Palette = PaletteKind.Ice;
+            CustomColorHex = "#A78BFA";
             AutoPauseFullscreen = true;
         }
 
@@ -121,6 +130,21 @@ namespace BibataIceTrail
                         bool r;
                         if (bool.TryParse(val, out r)) ClickRippleEnabled = r;
                     }
+                    else if (string.Equals(key, "DragGlowEnabled", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool d;
+                        if (bool.TryParse(val, out d)) DragGlowEnabled = d;
+                    }
+                    else if (string.Equals(key, "ShakeLocateEnabled", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool s;
+                        if (bool.TryParse(val, out s)) ShakeLocateEnabled = s;
+                    }
+                    else if (string.Equals(key, "HotkeyEnabled", StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool h;
+                        if (bool.TryParse(val, out h)) HotkeyEnabled = h;
+                    }
                     else if (string.Equals(key, "Preset", StringComparison.OrdinalIgnoreCase))
                     {
                         int p;
@@ -132,9 +156,17 @@ namespace BibataIceTrail
                     else if (string.Equals(key, "Palette", StringComparison.OrdinalIgnoreCase))
                     {
                         int c;
-                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out c) && c >= 0 && c <= 2)
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out c) && c >= 0 && c <= 3)
                         {
                             Palette = (PaletteKind)c;
+                        }
+                    }
+                    else if (string.Equals(key, "CustomColor", StringComparison.OrdinalIgnoreCase))
+                    {
+                        byte cr, cg, cb;
+                        if (TryParseHexColor(val, out cr, out cg, out cb))
+                        {
+                            CustomColorHex = string.Format(CultureInfo.InvariantCulture, "#{0:X2}{1:X2}{2:X2}", cr, cg, cb);
                         }
                     }
                     else if (string.Equals(key, "AutoPauseFullscreen", StringComparison.OrdinalIgnoreCase))
@@ -163,8 +195,12 @@ namespace BibataIceTrail
                 sb.AppendLine("Enabled=" + (Enabled ? "true" : "false"));
                 sb.AppendLine("TrailEnabled=" + (TrailEnabled ? "true" : "false"));
                 sb.AppendLine("ClickRippleEnabled=" + (ClickRippleEnabled ? "true" : "false"));
+                sb.AppendLine("DragGlowEnabled=" + (DragGlowEnabled ? "true" : "false"));
+                sb.AppendLine("ShakeLocateEnabled=" + (ShakeLocateEnabled ? "true" : "false"));
+                sb.AppendLine("HotkeyEnabled=" + (HotkeyEnabled ? "true" : "false"));
                 sb.AppendLine("Preset=" + ((int)Preset).ToString(CultureInfo.InvariantCulture));
                 sb.AppendLine("Palette=" + ((int)Palette).ToString(CultureInfo.InvariantCulture));
+                sb.AppendLine("CustomColor=" + CustomColorHex);
                 sb.AppendLine("AutoPauseFullscreen=" + (AutoPauseFullscreen ? "true" : "false"));
                 File.WriteAllText(_path, sb.ToString(), Encoding.UTF8);
             }
@@ -212,10 +248,38 @@ namespace BibataIceTrail
             return p;
         }
 
-        public static ColorPalette GetPalette(PaletteKind kind)
+        public static bool TryParseHexColor(string hex, out byte r, out byte g, out byte b)
+        {
+            r = 167;
+            g = 139;
+            b = 250;
+            if (string.IsNullOrEmpty(hex)) return false;
+            string s = hex.Trim();
+            if (s.StartsWith("#", StringComparison.Ordinal)) s = s.Substring(1);
+            if (s.Length != 6) return false;
+            int rgb;
+            if (!int.TryParse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out rgb)) return false;
+            r = (byte)((rgb >> 16) & 0xFF);
+            g = (byte)((rgb >> 8) & 0xFF);
+            b = (byte)(rgb & 0xFF);
+            return true;
+        }
+
+        public static ColorPalette GetPalette(PaletteKind kind, string customHex)
         {
             ColorPalette c = new ColorPalette();
-            if (kind == PaletteKind.Cyan)
+            if (kind == PaletteKind.Custom)
+            {
+                byte hr, hg, hb;
+                TryParseHexColor(customHex, out hr, out hg, out hb);
+                c.HaloR = (float)hr / 255f;
+                c.HaloG = (float)hg / 255f;
+                c.HaloB = (float)hb / 255f;
+                c.CoreR = c.HaloR + (1.0f - c.HaloR) * 0.82f;
+                c.CoreG = c.HaloG + (1.0f - c.HaloG) * 0.82f;
+                c.CoreB = c.HaloB + (1.0f - c.HaloB) * 0.82f;
+            }
+            else if (kind == PaletteKind.Cyan)
             {
                 c.HaloR = 56f / 255f;
                 c.HaloG = 232f / 255f;
@@ -259,6 +323,14 @@ namespace BibataIceTrail
         public const int WM_MOUSEACTIVATE = 0x0021;
         public const int WM_NCHITTEST = 0x0084;
         public const int WM_INPUT = 0x00FF;
+        public const int WM_HOTKEY = 0x0312;
+
+        public const int VK_LBUTTON = 0x01;
+        public const uint MOD_ALT = 0x0001;
+        public const uint MOD_CONTROL = 0x0002;
+        public const uint MOD_SHIFT = 0x0004;
+        public const uint MOD_NOREPEAT = 0x4000;
+        public const uint VK_G = 0x47;
 
         public const int HTTRANSPARENT = -1;
         public const int MA_NOACTIVATE = 3;
@@ -279,6 +351,7 @@ namespace BibataIceTrail
         public const uint RID_INPUT = 0x10000003;
         public const int RIM_TYPEMOUSE = 0;
         public const ushort RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001;
+        public const ushort RI_MOUSE_LEFT_BUTTON_UP = 0x0002;
         public const ushort RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004;
         public const ushort RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010;
         public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
@@ -516,6 +589,15 @@ namespace BibataIceTrail
             int cy,
             uint uFlags);
 
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
         public static void EnablePerMonitorDpi()
         {
             try
@@ -733,6 +815,291 @@ namespace BibataIceTrail
         }
     }
 
+    internal sealed class InteractionState
+    {
+        private const double ShakeWindowMs = 420.0;
+        private const double ShakeMinLegPx = 35.0;
+        private const double ShakeMinTotalPx = 220.0;
+        private const double ShakeBeaconMs = 650.0;
+        private const double ShakeCooldownMs = 700.0;
+        private const double DragThresholdLogicalPx = 8.0;
+        private const double DragFadeInMs = 90.0;
+        private const double DragFadeOutMs = 110.0;
+
+        private readonly object _lock = new object();
+
+        // Shake state
+        private int _shakeLastX;
+        private long _shakeLastTicks;
+        private bool _shakeHasLast;
+        private int _legDir;
+        private double _legDistLogical;
+        private readonly long[] _revTicks = new long[8];
+        private readonly double[] _revDist = new double[8];
+        private int _revHead;
+        private int _revCount;
+        private long _shakeStartTicks;
+        private long _lastShakeTriggerTicks;
+
+        // Drag state
+        private bool _leftDown;
+        private int _downX;
+        private int _downY;
+        private bool _dragActive;
+        private long _dragStartTicks;
+        private long _dragReleaseTicks;
+
+        public void OnLeftDown(int x, int y, long ticks)
+        {
+            lock (_lock)
+            {
+                _leftDown = true;
+                _downX = x;
+                _downY = y;
+                _dragActive = false;
+            }
+        }
+
+        public void OnLeftUp(long ticks)
+        {
+            lock (_lock)
+            {
+                _leftDown = false;
+                if (_dragActive)
+                {
+                    _dragActive = false;
+                    _dragReleaseTicks = ticks;
+                }
+            }
+        }
+
+        public bool OnCursorMove(int x, int y, long ticks, uint dpi, bool shakeEnabled, bool dragEnabled)
+        {
+            bool shakeTriggered = false;
+            double logicalScale = 96.0 / (double)dpi;
+            double freq = (double)Stopwatch.Frequency;
+
+            lock (_lock)
+            {
+                if (dragEnabled && _leftDown && !_dragActive)
+                {
+                    double dx = (double)(x - _downX) * logicalScale;
+                    double dy = (double)(y - _downY) * logicalScale;
+                    if ((dx * dx + dy * dy) >= (DragThresholdLogicalPx * DragThresholdLogicalPx))
+                    {
+                        _dragActive = true;
+                        _dragStartTicks = ticks;
+                    }
+                }
+                else if (!dragEnabled)
+                {
+                    _dragActive = false;
+                }
+
+                if (!shakeEnabled)
+                {
+                    _shakeHasLast = false;
+                    _legDir = 0;
+                    _legDistLogical = 0.0;
+                    _revHead = 0;
+                    _revCount = 0;
+                    return false;
+                }
+
+                if (!_shakeHasLast)
+                {
+                    _shakeHasLast = true;
+                    _shakeLastX = x;
+                    _shakeLastTicks = ticks;
+                    return false;
+                }
+
+                double dtMs = (double)(ticks - _shakeLastTicks) * 1000.0 / freq;
+                if (dtMs > 180.0 || dtMs < 0.0)
+                {
+                    _shakeLastX = x;
+                    _shakeLastTicks = ticks;
+                    _legDir = 0;
+                    _legDistLogical = 0.0;
+                    _revHead = 0;
+                    _revCount = 0;
+                    return false;
+                }
+
+                double stepX = (double)(x - _shakeLastX) * logicalScale;
+                _shakeLastX = x;
+                _shakeLastTicks = ticks;
+
+                if (Math.Abs(stepX) < 0.5)
+                {
+                    return false;
+                }
+
+                int dir = stepX > 0.0 ? 1 : -1;
+                double absStep = Math.Abs(stepX);
+
+                if (_legDir == 0)
+                {
+                    _legDir = dir;
+                    _legDistLogical = absStep;
+                }
+                else if (dir == _legDir)
+                {
+                    _legDistLogical += absStep;
+                }
+                else
+                {
+                    if (_legDistLogical >= ShakeMinLegPx)
+                    {
+                        PushReversal(ticks, _legDistLogical);
+                    }
+                    _legDir = dir;
+                    _legDistLogical = absStep;
+                }
+
+                PruneOldReversals(ticks, freq);
+                if (_revCount >= 3)
+                {
+                    double totalTravel = _legDistLogical;
+                    for (int i = 0; i < _revCount; i++)
+                    {
+                        totalTravel += _revDist[(_revHead + i) % _revDist.Length];
+                    }
+
+                    if (totalTravel >= ShakeMinTotalPx)
+                    {
+                        double sinceLastMs = _lastShakeTriggerTicks == 0
+                            ? ShakeCooldownMs + 1.0
+                            : (double)(ticks - _lastShakeTriggerTicks) * 1000.0 / freq;
+                        if (sinceLastMs >= ShakeCooldownMs)
+                        {
+                            _shakeStartTicks = ticks;
+                            _lastShakeTriggerTicks = ticks;
+                            _revHead = 0;
+                            _revCount = 0;
+                            _legDir = 0;
+                            _legDistLogical = 0.0;
+                            shakeTriggered = true;
+                        }
+                    }
+                }
+            }
+
+            return shakeTriggered;
+        }
+
+        private void PushReversal(long ticks, double legDist)
+        {
+            int idx = (_revHead + _revCount) % _revTicks.Length;
+            if (_revCount == _revTicks.Length)
+            {
+                _revTicks[_revHead] = ticks;
+                _revDist[_revHead] = legDist;
+                _revHead = (_revHead + 1) % _revTicks.Length;
+            }
+            else
+            {
+                _revTicks[idx] = ticks;
+                _revDist[idx] = legDist;
+                _revCount++;
+            }
+        }
+
+        private void PruneOldReversals(long nowTicks, double freq)
+        {
+            long maxAge = (long)(ShakeWindowMs * freq / 1000.0);
+            while (_revCount > 0 && (nowTicks - _revTicks[_revHead]) > maxAge)
+            {
+                _revHead = (_revHead + 1) % _revTicks.Length;
+                _revCount--;
+            }
+        }
+
+        public void SampleVisualState(
+            long nowTicks,
+            bool leftKeyStillDown,
+            bool shakeEnabled,
+            bool dragEnabled,
+            out float shakeProgress,
+            out float dragAlpha,
+            out float dragPhaseSec)
+        {
+            shakeProgress = -1.0f;
+            dragAlpha = 0.0f;
+            dragPhaseSec = 0.0f;
+            double freq = (double)Stopwatch.Frequency;
+
+            lock (_lock)
+            {
+                if (_leftDown && !leftKeyStillDown)
+                {
+                    _leftDown = false;
+                    if (_dragActive)
+                    {
+                        _dragActive = false;
+                        _dragReleaseTicks = nowTicks;
+                    }
+                }
+
+                if (shakeEnabled && _shakeStartTicks > 0)
+                {
+                    double ageMs = (double)(nowTicks - _shakeStartTicks) * 1000.0 / freq;
+                    if (ageMs >= 0.0 && ageMs < ShakeBeaconMs)
+                    {
+                        shakeProgress = (float)(ageMs / ShakeBeaconMs);
+                    }
+                    else
+                    {
+                        _shakeStartTicks = 0;
+                    }
+                }
+
+                if (dragEnabled)
+                {
+                    if (_dragActive)
+                    {
+                        double activeMs = (double)(nowTicks - _dragStartTicks) * 1000.0 / freq;
+                        if (activeMs < 0.0) activeMs = 0.0;
+                        double t = activeMs / DragFadeInMs;
+                        if (t > 1.0) t = 1.0;
+                        dragAlpha = (float)(t * t * (3.0 - 2.0 * t));
+                        dragPhaseSec = (float)(activeMs / 1000.0);
+                    }
+                    else if (_dragReleaseTicks > 0)
+                    {
+                        double relMs = (double)(nowTicks - _dragReleaseTicks) * 1000.0 / freq;
+                        if (relMs >= 0.0 && relMs < DragFadeOutMs)
+                        {
+                            double inv = 1.0 - relMs / DragFadeOutMs;
+                            dragAlpha = (float)(inv * inv);
+                            dragPhaseSec = (float)((double)(nowTicks - _dragStartTicks) * 1000.0 / freq / 1000.0);
+                        }
+                        else
+                        {
+                            _dragReleaseTicks = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        public void Clear()
+        {
+            lock (_lock)
+            {
+                _shakeHasLast = false;
+                _legDir = 0;
+                _legDistLogical = 0.0;
+                _revHead = 0;
+                _revCount = 0;
+                _shakeStartTicks = 0;
+                _leftDown = false;
+                _dragActive = false;
+                _dragReleaseTicks = 0;
+            }
+        }
+    }
+
     internal sealed class TrailRenderer : IDisposable
     {
         private IntPtr _memDC;
@@ -759,6 +1126,11 @@ namespace BibataIceTrail
             ClickRipple[] ripples,
             int rippleCount,
             bool rippleEnabled,
+            int cursorX,
+            int cursorY,
+            float shakeProgress,
+            float dragAlpha,
+            float dragPhaseSec,
             long nowTicks,
             uint dpi,
             TrailPreset preset,
@@ -875,7 +1247,31 @@ namespace BibataIceTrail
                 }
             }
 
-            if (!hasTrail && !hasAnyRipple) return false;
+            bool hasShake = (shakeProgress >= 0.0f && shakeProgress < 1.0f);
+            if (hasShake)
+            {
+                float shakeReach = 60.0f * scale;
+                float sx = (float)cursorX;
+                float sy = (float)cursorY;
+                if (sx - shakeReach < bMinX) bMinX = sx - shakeReach;
+                if (sy - shakeReach < bMinY) bMinY = sy - shakeReach;
+                if (sx + shakeReach > bMaxX) bMaxX = sx + shakeReach;
+                if (sy + shakeReach > bMaxY) bMaxY = sy + shakeReach;
+            }
+
+            bool hasDrag = (dragAlpha > 0.005f);
+            if (hasDrag)
+            {
+                float dragReach = 24.0f * scale;
+                float dx = (float)cursorX;
+                float dy = (float)cursorY;
+                if (dx - dragReach < bMinX) bMinX = dx - dragReach;
+                if (dy - dragReach < bMinY) bMinY = dy - dragReach;
+                if (dx + dragReach > bMaxX) bMaxX = dx + dragReach;
+                if (dy + dragReach > bMaxY) bMaxY = dy + dragReach;
+            }
+
+            if (!hasTrail && !hasAnyRipple && !hasShake && !hasDrag) return false;
 
             outX = (int)Math.Floor(bMinX);
             outY = (int)Math.Floor(bMinY);
@@ -899,6 +1295,14 @@ namespace BibataIceTrail
             if (hasAnyRipple)
             {
                 AccumulateRipples(outX, outY, outW, outH, ripples, rippleCount, nowTicks, scale, preset);
+            }
+            if (hasShake)
+            {
+                AccumulateShakeBeacon(outX, outY, outW, outH, cursorX, cursorY, shakeProgress, scale);
+            }
+            if (hasDrag)
+            {
+                AccumulateDragGlow(outX, outY, outW, outH, cursorX, cursorY, dragAlpha, dragPhaseSec, scale);
             }
             int nonZero = CompositePremultiplied(outW, outH, preset, palette);
             return nonZero > 0;
@@ -1331,6 +1735,148 @@ namespace BibataIceTrail
             }
         }
 
+        private unsafe void AccumulateShakeBeacon(
+            int originX,
+            int originY,
+            int bboxW,
+            int bboxH,
+            int cursorX,
+            int cursorY,
+            float progress,
+            float scale)
+        {
+            float fadeIn = SmoothStep(0.0f, 0.14f, progress);
+            float inv = 1.0f - progress;
+            float fadeOut = inv * inv;
+            float alphaEnv = fadeIn * fadeOut * 1.15f;
+            if (alphaEnv <= 0.005f) return;
+
+            float easeOut = 1.0f - inv * inv * inv;
+            float pulse = (float)Math.Sin((double)progress * Math.PI * 3.0);
+            float ringR = (26.0f + 16.0f * easeOut + 3.5f * pulse) * scale;
+            float ringHaloW = 10.5f * scale;
+            float ringCoreW = 2.8f * scale;
+            float auraR = ringR * 0.72f;
+
+            float cx = (float)(cursorX - originX);
+            float cy = (float)(cursorY - originY);
+            float reach = ringR + ringHaloW + 1.0f;
+
+            int x0 = (int)Math.Floor(cx - reach);
+            int y0 = (int)Math.Floor(cy - reach);
+            int x1 = (int)Math.Ceiling(cx + reach);
+            int y1 = (int)Math.Ceiling(cy + reach);
+
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 >= bboxW) x1 = bboxW - 1;
+            if (y1 >= bboxH) y1 = bboxH - 1;
+
+            fixed (float* pHalo = _haloBuf)
+            fixed (float* pCore = _coreBuf)
+            {
+                for (int py = y0; py <= y1; py++)
+                {
+                    float dy = (py + 0.5f) - cy;
+                    float dy2 = dy * dy;
+                    int rowOffset = py * bboxW;
+                    for (int px = x0; px <= x1; px++)
+                    {
+                        float dx = (px + 0.5f) - cx;
+                        float dist = (float)Math.Sqrt(dx * dx + dy2);
+                        int idx = rowOffset + px;
+
+                        float dRing = dist - ringR;
+                        if (dRing < 0.0f) dRing = -dRing;
+                        if (dRing < ringHaloW)
+                        {
+                            float nh = 1.0f - dRing / ringHaloW;
+                            float hVal = nh * nh * nh * alphaEnv;
+                            if (hVal > pHalo[idx]) pHalo[idx] = hVal;
+
+                            if (dRing < ringCoreW)
+                            {
+                                float nc = 1.0f - dRing / ringCoreW;
+                                float cVal = (nc * nc * (3.0f - 2.0f * nc)) * alphaEnv;
+                                if (cVal > pCore[idx]) pCore[idx] = cVal;
+                            }
+                        }
+
+                        if (dist < auraR)
+                        {
+                            float na = 1.0f - dist / auraR;
+                            float auraVal = na * na * alphaEnv * 0.24f;
+                            if (auraVal > pHalo[idx]) pHalo[idx] = auraVal;
+                        }
+                    }
+                }
+            }
+        }
+
+        private unsafe void AccumulateDragGlow(
+            int originX,
+            int originY,
+            int bboxW,
+            int bboxH,
+            int cursorX,
+            int cursorY,
+            float dragAlpha,
+            float phaseSec,
+            float scale)
+        {
+            float breath = 0.86f + 0.14f * (float)Math.Sin((double)phaseSec * 6.0);
+            float haloR = 15.5f * scale * breath;
+            float coreR = 5.5f * scale * breath;
+
+            float cx = (float)(cursorX - originX);
+            float cy = (float)(cursorY - originY);
+            float reach = haloR + 1.0f;
+
+            int x0 = (int)Math.Floor(cx - reach);
+            int y0 = (int)Math.Floor(cy - reach);
+            int x1 = (int)Math.Ceiling(cx + reach);
+            int y1 = (int)Math.Ceiling(cy + reach);
+
+            if (x0 < 0) x0 = 0;
+            if (y0 < 0) y0 = 0;
+            if (x1 >= bboxW) x1 = bboxW - 1;
+            if (y1 >= bboxH) y1 = bboxH - 1;
+
+            float haloMax = 0.72f * dragAlpha;
+            float coreMax = 0.44f * dragAlpha;
+
+            fixed (float* pHalo = _haloBuf)
+            fixed (float* pCore = _coreBuf)
+            {
+                for (int py = y0; py <= y1; py++)
+                {
+                    float dy = (py + 0.5f) - cy;
+                    float dy2 = dy * dy;
+                    int rowOffset = py * bboxW;
+                    for (int px = x0; px <= x1; px++)
+                    {
+                        float dx = (px + 0.5f) - cx;
+                        float dist2 = dx * dx + dy2;
+                        if (dist2 >= haloR * haloR) continue;
+
+                        float dist = (float)Math.Sqrt(dist2);
+                        int idx = rowOffset + px;
+
+                        float nh = 1.0f - dist / haloR;
+                        float hVal = nh * nh * nh * haloMax;
+                        if (hVal > pHalo[idx]) pHalo[idx] = hVal;
+
+                        if (dist < coreR)
+                        {
+                            float nc = 1.0f - dist / coreR;
+                            float cVal = (nc * nc * (3.0f - 2.0f * nc)) * coreMax;
+                            if (cVal > pCore[idx]) pCore[idx] = cVal;
+                        }
+                    }
+                }
+            }
+        }
+
         private unsafe int CompositePremultiplied(int bboxW, int bboxH, TrailPreset preset, ColorPalette palette)
         {
             uint* dibBase = (uint*)_dibBits.ToPointer();
@@ -1428,12 +1974,15 @@ namespace BibataIceTrail
     {
         private readonly SampleRingBuffer _buffer;
         private readonly ClickRippleBuffer _ripples;
+        private readonly InteractionState _interaction;
         private readonly AutoResetEvent _wakeEvent;
         private readonly ManualResetEvent _stopEvent;
         private readonly object _configLock = new object();
         private bool _enabled;
         private bool _trailEnabled;
         private bool _clickRippleEnabled;
+        private bool _dragGlowEnabled;
+        private bool _shakeLocateEnabled;
         private TrailPreset _preset;
         private ColorPalette _palette;
         private bool _autoPauseFullscreen;
@@ -1442,10 +1991,11 @@ namespace BibataIceTrail
         private IntPtr _hwnd;
         private NativeMethods.WndProcDelegate _wndProcDelegate;
 
-        public OverlayEngine(SampleRingBuffer buffer, ClickRippleBuffer ripples, AppConfig config)
+        public OverlayEngine(SampleRingBuffer buffer, ClickRippleBuffer ripples, InteractionState interaction, AppConfig config)
         {
             _buffer = buffer;
             _ripples = ripples;
+            _interaction = interaction;
             _wakeEvent = new AutoResetEvent(false);
             _stopEvent = new ManualResetEvent(false);
             ApplyConfig(config);
@@ -1458,8 +2008,10 @@ namespace BibataIceTrail
                 _enabled = config.Enabled;
                 _trailEnabled = config.TrailEnabled;
                 _clickRippleEnabled = config.ClickRippleEnabled;
+                _dragGlowEnabled = config.DragGlowEnabled;
+                _shakeLocateEnabled = config.ShakeLocateEnabled;
                 _preset = AppConfig.GetPreset(config.Preset);
-                _palette = AppConfig.GetPalette(config.Palette);
+                _palette = AppConfig.GetPalette(config.Palette, config.CustomColorHex);
                 _autoPauseFullscreen = config.AutoPauseFullscreen;
             }
             _wakeEvent.Set();
@@ -1567,6 +2119,8 @@ namespace BibataIceTrail
                     bool enabled;
                     bool trailEnabled;
                     bool rippleEnabled;
+                    bool dragEnabled;
+                    bool shakeEnabled;
                     TrailPreset preset;
                     ColorPalette palette;
                     bool autoPause;
@@ -1575,6 +2129,8 @@ namespace BibataIceTrail
                         enabled = _enabled;
                         trailEnabled = _trailEnabled;
                         rippleEnabled = _clickRippleEnabled;
+                        dragEnabled = _dragGlowEnabled;
+                        shakeEnabled = _shakeLocateEnabled;
                         preset = _preset;
                         palette = _palette;
                         autoPause = _autoPauseFullscreen;
@@ -1592,7 +2148,7 @@ namespace BibataIceTrail
                         fullscreenPaused = false;
                     }
 
-                    if (!enabled || (!trailEnabled && !rippleEnabled) || fullscreenPaused)
+                    if (!enabled || (!trailEnabled && !rippleEnabled && !dragEnabled && !shakeEnabled) || fullscreenPaused)
                     {
                         if (isShown)
                         {
@@ -1601,26 +2157,36 @@ namespace BibataIceTrail
                         }
                         _buffer.Clear();
                         _ripples.Clear();
+                        _interaction.Clear();
                         uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, NativeMethods.INFINITE, NativeMethods.QS_ALLINPUT);
                         if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) break;
                         continue;
                     }
 
-                    if (trailEnabled)
+                    NativeMethods.POINT curPt;
+                    bool gotCursor = NativeMethods.GetCursorPos(out curPt);
+                    if (gotCursor)
                     {
-                        NativeMethods.POINT curPt;
-                        if (NativeMethods.GetCursorPos(out curPt))
+                        if (trailEnabled)
                         {
                             _buffer.Push(curPt.X, curPt.Y, nowTicks);
-                            lastIdleX = curPt.X;
-                            lastIdleY = curPt.Y;
                         }
+                        lastIdleX = curPt.X;
+                        lastIdleY = curPt.Y;
                     }
+
+                    bool leftStillDown = dragEnabled && ((NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON) & 0x8000) != 0);
+                    float shakeProgress;
+                    float dragAlpha;
+                    float dragPhaseSec;
+                    _interaction.SampleVisualState(nowTicks, leftStillDown, shakeEnabled, dragEnabled, out shakeProgress, out dragAlpha, out dragPhaseSec);
 
                     int count = trailEnabled ? _buffer.CopyActive(nowTicks, preset.LifetimeMs, snapshot) : 0;
                     int rippleCount = rippleEnabled ? _ripples.CopyActive(nowTicks, preset.RippleDurationMs, rippleSnapshot) : 0;
+                    bool hasShake = shakeProgress >= 0.0f && shakeProgress < 1.0f;
+                    bool hasDrag = dragAlpha > 0.005f;
 
-                    if (count < 2 && rippleCount == 0)
+                    if (count < 2 && rippleCount == 0 && !hasShake && !hasDrag)
                     {
                         if (isShown)
                         {
@@ -1629,27 +2195,34 @@ namespace BibataIceTrail
                         }
                         uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, 25, NativeMethods.QS_ALLINPUT);
                         if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) break;
-                        if (trailEnabled)
+                        NativeMethods.POINT idlePt;
+                        if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
                         {
-                            NativeMethods.POINT idlePt;
-                            if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
+                            long idleTicks = Stopwatch.GetTimestamp();
+                            lastIdleX = idlePt.X;
+                            lastIdleY = idlePt.Y;
+                            if (trailEnabled)
                             {
-                                lastIdleX = idlePt.X;
-                                lastIdleY = idlePt.Y;
-                                _buffer.Push(idlePt.X, idlePt.Y, Stopwatch.GetTimestamp());
+                                _buffer.Push(idlePt.X, idlePt.Y, idleTicks);
+                            }
+                            if (shakeEnabled || dragEnabled)
+                            {
+                                uint idleDpi = NativeMethods.GetDpiAtPoint(idlePt.X, idlePt.Y);
+                                _interaction.OnCursorMove(idlePt.X, idlePt.Y, idleTicks, idleDpi, shakeEnabled, dragEnabled);
                             }
                         }
                         continue;
                     }
 
-                    int dpiX = (count >= 2) ? snapshot[count - 1].X : rippleSnapshot[rippleCount - 1].X;
-                    int dpiY = (count >= 2) ? snapshot[count - 1].Y : rippleSnapshot[rippleCount - 1].Y;
+                    int dpiX = gotCursor ? curPt.X : ((count >= 2) ? snapshot[count - 1].X : rippleSnapshot[rippleCount - 1].X);
+                    int dpiY = gotCursor ? curPt.Y : ((count >= 2) ? snapshot[count - 1].Y : rippleSnapshot[rippleCount - 1].Y);
                     uint dpi = NativeMethods.GetDpiAtPoint(dpiX, dpiY);
 
                     int bx, by, bw, bh;
                     bool hasPixels = renderer.RenderFrame(
                         snapshot, count, trailEnabled,
                         rippleSnapshot, rippleCount, rippleEnabled,
+                        dpiX, dpiY, shakeProgress, dragAlpha, dragPhaseSec,
                         nowTicks, dpi, preset, palette,
                         out bx, out by, out bw, out bh);
 
@@ -1662,14 +2235,20 @@ namespace BibataIceTrail
                         }
                         uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, 25, NativeMethods.QS_ALLINPUT);
                         if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) break;
-                        if (trailEnabled)
+                        NativeMethods.POINT idlePt;
+                        if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
                         {
-                            NativeMethods.POINT idlePt;
-                            if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
+                            long idleTicks = Stopwatch.GetTimestamp();
+                            lastIdleX = idlePt.X;
+                            lastIdleY = idlePt.Y;
+                            if (trailEnabled)
                             {
-                                lastIdleX = idlePt.X;
-                                lastIdleY = idlePt.Y;
-                                _buffer.Push(idlePt.X, idlePt.Y, Stopwatch.GetTimestamp());
+                                _buffer.Push(idlePt.X, idlePt.Y, idleTicks);
+                            }
+                            if (shakeEnabled || dragEnabled)
+                            {
+                                uint idleDpi = NativeMethods.GetDpiAtPoint(idlePt.X, idlePt.Y);
+                                _interaction.OnCursorMove(idlePt.X, idlePt.Y, idleTicks, idleDpi, shakeEnabled, dragEnabled);
                             }
                         }
                         continue;
@@ -1749,17 +2328,31 @@ namespace BibataIceTrail
 
     internal sealed class RawInputMessageWindow : NativeWindow, IDisposable
     {
+        private const int HotkeyId = 1;
+
         private readonly SampleRingBuffer _buffer;
         private readonly ClickRippleBuffer _ripples;
+        private readonly InteractionState _interaction;
         private readonly OverlayEngine _engine;
+        private readonly Action _onHotkeyToggle;
         private readonly byte[] _rawBuf = new byte[128];
         private readonly uint _rawHeaderSize;
+        private bool _hotkeyRegistered;
+        private volatile bool _shakeEnabled = true;
+        private volatile bool _dragEnabled = true;
 
-        public RawInputMessageWindow(SampleRingBuffer buffer, ClickRippleBuffer ripples, OverlayEngine engine)
+        public RawInputMessageWindow(
+            SampleRingBuffer buffer,
+            ClickRippleBuffer ripples,
+            InteractionState interaction,
+            OverlayEngine engine,
+            Action onHotkeyToggle)
         {
             _buffer = buffer;
             _ripples = ripples;
+            _interaction = interaction;
             _engine = engine;
+            _onHotkeyToggle = onHotkeyToggle;
             _rawHeaderSize = (uint)Marshal.SizeOf(typeof(NativeMethods.RAWINPUTHEADER));
 
             CreateParams cp = new CreateParams();
@@ -1778,9 +2371,41 @@ namespace BibataIceTrail
             NativeMethods.RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf(typeof(NativeMethods.RAWINPUTDEVICE)));
         }
 
+        public void SetTrackingOptions(bool shakeEnabled, bool dragEnabled, bool hotkeyEnabled)
+        {
+            _shakeEnabled = shakeEnabled;
+            _dragEnabled = dragEnabled;
+            SetHotkeyEnabled(hotkeyEnabled);
+        }
+
+        private void SetHotkeyEnabled(bool enable)
+        {
+            if (Handle == IntPtr.Zero) return;
+            if (enable && !_hotkeyRegistered)
+            {
+                _hotkeyRegistered = NativeMethods.RegisterHotKey(
+                    Handle,
+                    HotkeyId,
+                    NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT | NativeMethods.MOD_NOREPEAT,
+                    NativeMethods.VK_G);
+            }
+            else if (!enable && _hotkeyRegistered)
+            {
+                NativeMethods.UnregisterHotKey(Handle, HotkeyId);
+                _hotkeyRegistered = false;
+            }
+        }
+
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == NativeMethods.WM_INPUT)
+            if (m.Msg == NativeMethods.WM_HOTKEY)
+            {
+                if (m.WParam.ToInt32() == HotkeyId && _onHotkeyToggle != null)
+                {
+                    _onHotkeyToggle();
+                }
+            }
+            else if (m.Msg == NativeMethods.WM_INPUT)
             {
                 long nowTicks = Stopwatch.GetTimestamp();
                 NativeMethods.POINT pt;
@@ -1794,15 +2419,32 @@ namespace BibataIceTrail
                         if (dwType == NativeMethods.RIM_TYPEMOUSE)
                         {
                             ushort btnFlags = BitConverter.ToUInt16(_rawBuf, 28);
-                            if ((btnFlags & (NativeMethods.RI_MOUSE_LEFT_BUTTON_DOWN | NativeMethods.RI_MOUSE_MIDDLE_BUTTON_DOWN)) != 0)
+                            if ((btnFlags & NativeMethods.RI_MOUSE_LEFT_BUTTON_DOWN) != 0)
                             {
                                 _ripples.Push(pt.X, pt.Y, nowTicks, 0);
+                                _interaction.OnLeftDown(pt.X, pt.Y, nowTicks);
+                            }
+                            else if ((btnFlags & NativeMethods.RI_MOUSE_MIDDLE_BUTTON_DOWN) != 0)
+                            {
+                                _ripples.Push(pt.X, pt.Y, nowTicks, 0);
+                            }
+                            if ((btnFlags & NativeMethods.RI_MOUSE_LEFT_BUTTON_UP) != 0)
+                            {
+                                _interaction.OnLeftUp(nowTicks);
                             }
                             if ((btnFlags & NativeMethods.RI_MOUSE_RIGHT_BUTTON_DOWN) != 0)
                             {
                                 _ripples.Push(pt.X, pt.Y, nowTicks, 1);
                             }
                         }
+                    }
+
+                    bool shakeOn = _shakeEnabled;
+                    bool dragOn = _dragEnabled;
+                    if (shakeOn || dragOn)
+                    {
+                        uint dpi = NativeMethods.GetDpiAtPoint(pt.X, pt.Y);
+                        _interaction.OnCursorMove(pt.X, pt.Y, nowTicks, dpi, shakeOn, dragOn);
                     }
 
                     _buffer.Push(pt.X, pt.Y, nowTicks);
@@ -1814,6 +2456,7 @@ namespace BibataIceTrail
 
         public void Dispose()
         {
+            SetHotkeyEnabled(false);
             if (Handle != IntPtr.Zero)
             {
                 DestroyHandle();
@@ -1829,22 +2472,28 @@ namespace BibataIceTrail
         private readonly AppConfig _config;
         private readonly SampleRingBuffer _buffer;
         private readonly ClickRippleBuffer _ripples;
+        private readonly InteractionState _interaction;
         private readonly OverlayEngine _engine;
         private readonly RawInputMessageWindow _inputSink;
         private readonly NotifyIcon _notifyIcon;
         private readonly Icon _activeIcon;
         private readonly Icon _pausedIcon;
+        private bool _colorDialogOpen;
 
         private ToolStripMenuItem _itemEnabled;
         private ToolStripMenuItem _itemTrailEnabled;
         private ToolStripMenuItem _itemClickEnabled;
+        private ToolStripMenuItem _itemDragEnabled;
+        private ToolStripMenuItem _itemShakeEnabled;
         private ToolStripMenuItem _itemPresetLight;
         private ToolStripMenuItem _itemPresetStd;
         private ToolStripMenuItem _itemPresetVivid;
         private ToolStripMenuItem _itemColorIce;
         private ToolStripMenuItem _itemColorCyan;
         private ToolStripMenuItem _itemColorFrost;
+        private ToolStripMenuItem _itemColorCustom;
         private ToolStripMenuItem _itemFullscreen;
+        private ToolStripMenuItem _itemHotkeyEnabled;
         private ToolStripMenuItem _itemAutoStart;
 
         public TrayApplicationContext(AppConfig config)
@@ -1852,9 +2501,11 @@ namespace BibataIceTrail
             _config = config;
             _buffer = new SampleRingBuffer(512);
             _ripples = new ClickRippleBuffer(16);
-            _engine = new OverlayEngine(_buffer, _ripples, _config);
+            _interaction = new InteractionState();
+            _engine = new OverlayEngine(_buffer, _ripples, _interaction, _config);
             _engine.Start();
-            _inputSink = new RawInputMessageWindow(_buffer, _ripples, _engine);
+            _inputSink = new RawInputMessageWindow(_buffer, _ripples, _interaction, _engine, new Action(ToggleEnabled));
+            _inputSink.SetTrackingOptions(_config.ShakeLocateEnabled, _config.DragGlowEnabled, _config.HotkeyEnabled);
 
             _activeIcon = CreateTrayIcon(true);
             _pausedIcon = CreateTrayIcon(false);
@@ -1882,6 +2533,14 @@ namespace BibataIceTrail
             _itemClickEnabled.Click += delegate { ToggleClickRippleEnabled(); };
             menu.Items.Add(_itemClickEnabled);
 
+            _itemDragEnabled = new ToolStripMenuItem("拖拽柔光反馈");
+            _itemDragEnabled.Click += delegate { ToggleDragGlowEnabled(); };
+            menu.Items.Add(_itemDragEnabled);
+
+            _itemShakeEnabled = new ToolStripMenuItem("甩动定位指针");
+            _itemShakeEnabled.Click += delegate { ToggleShakeLocateEnabled(); };
+            menu.Items.Add(_itemShakeEnabled);
+
             menu.Items.Add(new ToolStripSeparator());
 
             ToolStripMenuItem presetRoot = new ToolStripMenuItem("风格预设");
@@ -1903,14 +2562,22 @@ namespace BibataIceTrail
             _itemColorCyan.Click += delegate { SetPalette(PaletteKind.Cyan); };
             _itemColorFrost = new ToolStripMenuItem("霜白 Frost");
             _itemColorFrost.Click += delegate { SetPalette(PaletteKind.Frost); };
+            _itemColorCustom = new ToolStripMenuItem("自定义颜色...");
+            _itemColorCustom.Click += delegate { PickCustomColor(); };
             colorRoot.DropDownItems.Add(_itemColorIce);
             colorRoot.DropDownItems.Add(_itemColorCyan);
             colorRoot.DropDownItems.Add(_itemColorFrost);
+            colorRoot.DropDownItems.Add(new ToolStripSeparator());
+            colorRoot.DropDownItems.Add(_itemColorCustom);
             menu.Items.Add(colorRoot);
 
             _itemFullscreen = new ToolStripMenuItem("全屏应用自动暂停");
             _itemFullscreen.Click += delegate { ToggleFullscreenPause(); };
             menu.Items.Add(_itemFullscreen);
+
+            _itemHotkeyEnabled = new ToolStripMenuItem("快捷键开关 (Ctrl+Alt+Shift+G)");
+            _itemHotkeyEnabled.Click += delegate { ToggleHotkeyEnabled(); };
+            menu.Items.Add(_itemHotkeyEnabled);
 
             _itemAutoStart = new ToolStripMenuItem("开机自动启动");
             _itemAutoStart.Click += delegate { ToggleAutoStart(); };
@@ -1955,6 +2622,66 @@ namespace BibataIceTrail
             _config.Save();
             _engine.ApplyConfig(_config);
             SyncMenuAndIcon();
+        }
+
+        private void ToggleDragGlowEnabled()
+        {
+            _config.DragGlowEnabled = !_config.DragGlowEnabled;
+            _config.Save();
+            _inputSink.SetTrackingOptions(_config.ShakeLocateEnabled, _config.DragGlowEnabled, _config.HotkeyEnabled);
+            _engine.ApplyConfig(_config);
+            SyncMenuAndIcon();
+        }
+
+        private void ToggleShakeLocateEnabled()
+        {
+            _config.ShakeLocateEnabled = !_config.ShakeLocateEnabled;
+            _config.Save();
+            _inputSink.SetTrackingOptions(_config.ShakeLocateEnabled, _config.DragGlowEnabled, _config.HotkeyEnabled);
+            _engine.ApplyConfig(_config);
+            SyncMenuAndIcon();
+        }
+
+        private void ToggleHotkeyEnabled()
+        {
+            _config.HotkeyEnabled = !_config.HotkeyEnabled;
+            _config.Save();
+            _inputSink.SetTrackingOptions(_config.ShakeLocateEnabled, _config.DragGlowEnabled, _config.HotkeyEnabled);
+            SyncMenuAndIcon();
+        }
+
+        private void PickCustomColor()
+        {
+            if (_colorDialogOpen) return;
+            _colorDialogOpen = true;
+            try
+            {
+                byte r, g, b;
+                AppConfig.TryParseHexColor(_config.CustomColorHex, out r, out g, out b);
+                using (ColorDialog dlg = new ColorDialog())
+                {
+                    dlg.FullOpen = true;
+                    dlg.AnyColor = true;
+                    dlg.Color = Color.FromArgb(r, g, b);
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        _config.CustomColorHex = string.Format(
+                            CultureInfo.InvariantCulture,
+                            "#{0:X2}{1:X2}{2:X2}",
+                            dlg.Color.R,
+                            dlg.Color.G,
+                            dlg.Color.B);
+                        _config.Palette = PaletteKind.Custom;
+                        _config.Save();
+                        _engine.ApplyConfig(_config);
+                        SyncMenuAndIcon();
+                    }
+                }
+            }
+            finally
+            {
+                _colorDialogOpen = false;
+            }
         }
 
         private void SetPreset(PresetKind preset)
@@ -2032,13 +2759,20 @@ namespace BibataIceTrail
             _itemEnabled.Checked = _config.Enabled;
             _itemTrailEnabled.Checked = _config.TrailEnabled;
             _itemClickEnabled.Checked = _config.ClickRippleEnabled;
+            _itemDragEnabled.Checked = _config.DragGlowEnabled;
+            _itemShakeEnabled.Checked = _config.ShakeLocateEnabled;
             _itemPresetLight.Checked = _config.Preset == PresetKind.Light;
             _itemPresetStd.Checked = _config.Preset == PresetKind.Standard;
             _itemPresetVivid.Checked = _config.Preset == PresetKind.Vivid;
             _itemColorIce.Checked = _config.Palette == PaletteKind.Ice;
             _itemColorCyan.Checked = _config.Palette == PaletteKind.Cyan;
             _itemColorFrost.Checked = _config.Palette == PaletteKind.Frost;
+            _itemColorCustom.Checked = _config.Palette == PaletteKind.Custom;
+            _itemColorCustom.Text = _config.Palette == PaletteKind.Custom
+                ? string.Format(CultureInfo.InvariantCulture, "自定义颜色 ({0})...", _config.CustomColorHex)
+                : "自定义颜色...";
             _itemFullscreen.Checked = _config.AutoPauseFullscreen;
+            _itemHotkeyEnabled.Checked = _config.HotkeyEnabled;
             _itemAutoStart.Checked = IsAutoStartEnabled();
 
             _notifyIcon.Icon = _config.Enabled ? _activeIcon : _pausedIcon;
@@ -2193,7 +2927,7 @@ namespace BibataIceTrail
                     }
 
                     TrailPreset preset = AppConfig.GetPreset(PresetKind.Standard);
-                    ColorPalette palette = AppConfig.GetPalette(PaletteKind.Ice);
+                    ColorPalette palette = AppConfig.GetPalette(PaletteKind.Ice, "#A78BFA");
 
                     ClickRipple[] ripples = new ClickRipple[2];
                     ripples[0].X = 720;
@@ -2207,7 +2941,7 @@ namespace BibataIceTrail
 
                     int bx, by, bw, bh;
                     Stopwatch sw = Stopwatch.StartNew();
-                    bool ok = renderer.RenderFrame(samples, samples.Length, true, ripples, ripples.Length, true, nowTicks, 144, preset, palette, out bx, out by, out bw, out bh);
+                    bool ok = renderer.RenderFrame(samples, samples.Length, true, ripples, ripples.Length, true, 720, 300, -1.0f, 0.0f, 0.0f, nowTicks, 144, preset, palette, out bx, out by, out bw, out bh);
                     sw.Stop();
 
                     int nonZeroPixels = 0;
@@ -2234,7 +2968,7 @@ namespace BibataIceTrail
 
                     // Stationary click-only rendering check (left + right click ripples without trail samples)
                     int cbx, cby, cbw, cbh;
-                    bool clickOnlyOk = renderer.RenderFrame(null, 0, true, ripples, ripples.Length, true, nowTicks, 144, preset, palette, out cbx, out cby, out cbw, out cbh);
+                    bool clickOnlyOk = renderer.RenderFrame(null, 0, true, ripples, ripples.Length, true, 720, 300, -1.0f, 0.0f, 0.0f, nowTicks, 144, preset, palette, out cbx, out cby, out cbw, out cbh);
                     int clickPixels = 0;
                     if (clickOnlyOk && renderer.DibBits != IntPtr.Zero)
                     {
@@ -2255,6 +2989,59 @@ namespace BibataIceTrail
                             }
                         }
                     }
+
+                    // Shake-beacon + drag-glow rendering check
+                    int ebx, eby, ebw, ebh;
+                    bool extraOk = renderer.RenderFrame(null, 0, false, null, 0, false, 500, 400, 0.25f, 1.0f, 0.5f, nowTicks, 144, preset, palette, out ebx, out eby, out ebw, out ebh);
+                    int extraPixels = 0;
+                    if (extraOk && renderer.DibBits != IntPtr.Zero)
+                    {
+                        uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+                        int stride = renderer.DibWidth;
+                        for (int y = 0; y < ebh; y++)
+                        {
+                            uint* row = dibBase + y * stride;
+                            for (int x = 0; x < ebw; x++)
+                            {
+                                uint px = row[x];
+                                byte a = (byte)(px >> 24);
+                                byte r = (byte)((px >> 16) & 0xFF);
+                                byte g = (byte)((px >> 8) & 0xFF);
+                                byte b = (byte)(px & 0xFF);
+                                if (a > 0) extraPixels++;
+                                if (r > a || g > a || b > a) alphaViolations++;
+                            }
+                        }
+                    }
+
+                    // Shake detector positive & negative check
+                    InteractionState shakePos = new InteractionState();
+                    bool shakeDetected = false;
+                    long simT = nowTicks;
+                    int[] shakePath = new int[] { 500, 620, 480, 630, 470, 640 };
+                    for (int k = 0; k < shakePath.Length; k++)
+                    {
+                        simT += (long)(55.0 * freq / 1000.0);
+                        if (shakePos.OnCursorMove(shakePath[k], 300, simT, 144, true, false))
+                        {
+                            shakeDetected = true;
+                        }
+                    }
+
+                    InteractionState shakeNeg = new InteractionState();
+                    bool falseShake = false;
+                    long simT2 = nowTicks;
+                    for (int k = 0; k < 20; k++)
+                    {
+                        simT2 += (long)(16.0 * freq / 1000.0);
+                        if (shakeNeg.OnCursorMove(200 + k * 20, 300, simT2, 144, true, false))
+                        {
+                            falseShake = true;
+                        }
+                    }
+
+                    ColorPalette customPal = AppConfig.GetPalette(PaletteKind.Custom, "#A78BFA");
+                    bool customPaletteOk = customPal.HaloR > 0.6f && customPal.HaloB > 0.9f && customPal.CoreR > customPal.HaloR;
 
                     int headerSize = Marshal.SizeOf(typeof(NativeMethods.RAWINPUTHEADER));
                     bool headerOk = (IntPtr.Size == 8 && headerSize == 24);
@@ -2328,15 +3115,15 @@ namespace BibataIceTrail
                     }
 
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} headerSize={8} alphaViolations={9} elapsedMs={10:F3} fullscreenBusy={11} ulwOk={12} ulwErr={13} ridOk={14} ridErr={15}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} headerSize={13} alphaViolations={14} elapsedMs={15:F3} fullscreenBusy={16} ulwOk={17} ulwErr={18} ridOk={19} ridErr={20}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
                     {
                         return 1;
                     }
