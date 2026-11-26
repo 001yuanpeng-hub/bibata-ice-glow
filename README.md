@@ -23,10 +23,11 @@
   - **全局快捷键 `Ctrl + Alt + Shift + G`**：随时一键暂停 / 恢复所有光影特效（不与常见软件快捷键冲突，录屏、演示或游戏时随手切换）。
   - **全屏应用自动暂停**（仅在独占全屏 Direct3D 游戏时自动隐藏）& **开机自动启动**（安装时默认开启）。
   - **可选托盘菜单 / 配置文件定制**：如需临时呼出托盘菜单切换预设、自定义颜色或单独开关某项特效，可在安装目录 `Bibata-Ice-Trail\config.ini` 中添加 `ShowTrayIcon=true` 后重启，或在启动程序时传入 `--show-tray` 参数；也可直接修改 `config.ini` 中的键值（常用键：`Enabled`、`TrailEnabled`、`ClickRippleEnabled`、`DragGlowEnabled`、`ShakeLocateEnabled`、`HotkeyEnabled`、`Preset`、`Palette`、`CustomColor`、`AutoPauseFullscreen`、`ShowTrayIcon`）。
+  - **多款光影配色**：支持 `冰蓝 Ice`（`0`）、`极光青 Cyan`（`1`）、`霜白 Frost`（`2`）、**`粉蓝幻梦 PinkBlue`（`4`，樱花粉 ↔ 冰蓝动态双色渐变）**、**`流光七彩 Rainbow`（`5`，全光谱流动虹彩渐变）** 以及自定义纯色（`3` + `CustomColor`）。
   - 托盘菜单开启后支持：
     - 左键单击快速暂停 / 启用；右键独立开关各项特效
     - 切换预设：`轻盈冰光` / `标准冰蓝（推荐）` / `灵动流光`
-    - 切换配色：`冰蓝 Ice` / `极光青 Cyan` / `霜白 Frost` / **自定义颜色...**（支持系统调色盘）
+    - 切换配色：`冰蓝 Ice` / `极光青 Cyan` / `霜白 Frost` / `粉蓝幻梦 Pink-Blue` / `流光七彩 Rainbow` / **自定义颜色...**（支持系统调色盘）
 
 ---
 
@@ -43,6 +44,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```powershell
 # 指定安装目录、尖角风格或大号指针
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir "D:\Software\Cursors" -Style Modern -Size Large
+
+# 使用粉蓝双色渐变或流光七彩渐变配色
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Palette PinkBlue
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Palette Rainbow
 
 # 如果已经装过指针，只安装流光与点击波纹
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipCursor
@@ -68,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
-   （如用户偏好尖角风格可加 `-Style Original`，2K/4K 高分屏或偏好大指针可加 `-Size Large`）。
+   （如用户偏好尖角风格可加 `-Style Original`，2K/4K 高分屏或偏好大指针可加 `-Size Large`，想要粉蓝渐变或七彩流光可加 `-Palette PinkBlue` 或 `-Palette Rainbow`）。
 3. `install.ps1` 会自动完成：
    - 从 `ful1e5/Bibata_Cursor` 下载最新 `Bibata-*-Ice-Windows.zip` 并写入 `HKCU:\Control Panel\Cursors` 立即刷新生效；
    - 本地编译 `src/BibataIceTrail.cs` 为 `BibataIceTrail.exe` 并通过 `--self-test` 自检；

@@ -26,7 +26,16 @@ namespace BibataIceTrail
         Ice = 0,
         Cyan = 1,
         Frost = 2,
-        Custom = 3
+        Custom = 3,
+        PinkBlue = 4,
+        Rainbow = 5
+    }
+
+    internal enum PaletteMode
+    {
+        Solid = 0,
+        PinkBlue = 1,
+        Rainbow = 2
     }
 
     internal struct TrailPreset
@@ -43,6 +52,7 @@ namespace BibataIceTrail
 
     internal struct ColorPalette
     {
+        public PaletteMode Mode;
         public float HaloR, HaloG, HaloB;
         public float CoreR, CoreG, CoreB;
     }
@@ -158,10 +168,16 @@ namespace BibataIceTrail
                     else if (string.Equals(key, "Palette", StringComparison.OrdinalIgnoreCase))
                     {
                         int c;
-                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out c) && c >= 0 && c <= 3)
+                        if (int.TryParse(val, NumberStyles.Integer, CultureInfo.InvariantCulture, out c) && c >= 0 && c <= 5)
                         {
                             Palette = (PaletteKind)c;
                         }
+                        else if (string.Equals(val, "Ice", StringComparison.OrdinalIgnoreCase)) Palette = PaletteKind.Ice;
+                        else if (string.Equals(val, "Cyan", StringComparison.OrdinalIgnoreCase)) Palette = PaletteKind.Cyan;
+                        else if (string.Equals(val, "Frost", StringComparison.OrdinalIgnoreCase)) Palette = PaletteKind.Frost;
+                        else if (string.Equals(val, "Custom", StringComparison.OrdinalIgnoreCase)) Palette = PaletteKind.Custom;
+                        else if (string.Equals(val, "PinkBlue", StringComparison.OrdinalIgnoreCase)) Palette = PaletteKind.PinkBlue;
+                        else if (string.Equals(val, "Rainbow", StringComparison.OrdinalIgnoreCase)) Palette = PaletteKind.Rainbow;
                     }
                     else if (string.Equals(key, "CustomColor", StringComparison.OrdinalIgnoreCase))
                     {
@@ -276,6 +292,7 @@ namespace BibataIceTrail
         public static ColorPalette GetPalette(PaletteKind kind, string customHex)
         {
             ColorPalette c = new ColorPalette();
+            c.Mode = PaletteMode.Solid;
             if (kind == PaletteKind.Custom)
             {
                 byte hr, hg, hb;
@@ -304,6 +321,26 @@ namespace BibataIceTrail
                 c.CoreR = 1.0f;
                 c.CoreG = 1.0f;
                 c.CoreB = 1.0f;
+            }
+            else if (kind == PaletteKind.PinkBlue)
+            {
+                c.Mode = PaletteMode.PinkBlue;
+                c.HaloR = 0.62f;
+                c.HaloG = 0.56f;
+                c.HaloB = 0.89f;
+                c.CoreR = 0.92f;
+                c.CoreG = 0.91f;
+                c.CoreB = 0.98f;
+            }
+            else if (kind == PaletteKind.Rainbow)
+            {
+                c.Mode = PaletteMode.Rainbow;
+                c.HaloR = 0.40f;
+                c.HaloG = 0.85f;
+                c.HaloB = 1.00f;
+                c.CoreR = 0.90f;
+                c.CoreG = 0.98f;
+                c.CoreB = 1.00f;
             }
             else
             {
@@ -1119,6 +1156,7 @@ namespace BibataIceTrail
 
         private float[] _haloBuf = new float[0];
         private float[] _coreBuf = new float[0];
+        private float[] _colorBuf = new float[0];
         private readonly List<SplineNode> _strokeNodes = new List<SplineNode>(256);
         private readonly List<SplineNode> _subdivNodes = new List<SplineNode>(1024);
 
@@ -1296,23 +1334,25 @@ namespace BibataIceTrail
             EnsureDib(outW, outH);
             if (_dibBits == IntPtr.Zero) return false;
 
+            bool trackColor = (palette.Mode != PaletteMode.Solid);
             if (hasTrail)
             {
-                AccumulateSdf(outX, outY, outW, outH, baseCoreR, baseHaloR);
+                AccumulateSdf(outX, outY, outW, outH, baseCoreR, baseHaloR, trackColor);
             }
             if (hasAnyRipple)
             {
-                AccumulateRipples(outX, outY, outW, outH, ripples, rippleCount, nowTicks, scale, preset);
+                AccumulateRipples(outX, outY, outW, outH, ripples, rippleCount, nowTicks, scale, preset, trackColor);
             }
             if (hasShake)
             {
-                AccumulateShakeBeacon(outX, outY, outW, outH, cursorX, cursorY, shakeProgress, scale);
+                AccumulateShakeBeacon(outX, outY, outW, outH, cursorX, cursorY, shakeProgress, scale, trackColor);
             }
             if (hasDrag)
             {
-                AccumulateDragGlow(outX, outY, outW, outH, cursorX, cursorY, dragAlpha, dragPhaseSec, scale);
+                AccumulateDragGlow(outX, outY, outW, outH, cursorX, cursorY, dragAlpha, dragPhaseSec, scale, trackColor);
             }
-            int nonZero = CompositePremultiplied(outW, outH, preset, palette);
+            float timeSec = (float)((double)(nowTicks % (Stopwatch.Frequency * 3600L)) / (double)Stopwatch.Frequency);
+            int nonZero = CompositePremultiplied(outW, outH, preset, palette, timeSec);
             return nonZero > 0;
         }
 
@@ -1483,6 +1523,7 @@ namespace BibataIceTrail
                 int newCap = Math.Max(needed, 65536);
                 _haloBuf = new float[newCap];
                 _coreBuf = new float[newCap];
+                _colorBuf = new float[newCap];
             }
         }
 
@@ -1521,10 +1562,11 @@ namespace BibataIceTrail
             }
         }
 
-        private unsafe void AccumulateSdf(int originX, int originY, int bboxW, int bboxH, float baseCoreR, float baseHaloR)
+        private unsafe void AccumulateSdf(int originX, int originY, int bboxW, int bboxH, float baseCoreR, float baseHaloR, bool trackColor)
         {
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
+            fixed (float* pColor = _colorBuf)
             {
                 int count = _subdivNodes.Count;
                 for (int i = 0; i < count - 1; i++)
@@ -1591,7 +1633,11 @@ namespace BibataIceTrail
                             float hVal = nh * nh * nh * u2 * env;
 
                             int idx = rowOffset + px;
-                            if (hVal > pHalo[idx]) pHalo[idx] = hVal;
+                            if (hVal > pHalo[idx])
+                            {
+                                pHalo[idx] = hVal;
+                                if (trackColor) pColor[idx] = u * 0.55f;
+                            }
 
                             float localCoreR = baseCoreR * (0.35f + 0.65f * u);
                             if (dist < localCoreR)
@@ -1616,11 +1662,13 @@ namespace BibataIceTrail
             int rippleCount,
             long nowTicks,
             float scale,
-            TrailPreset preset)
+            TrailPreset preset,
+            bool trackColor)
         {
             double freq = (double)Stopwatch.Frequency;
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
+            fixed (float* pColor = _colorBuf)
             {
                 for (int i = 0; i < rippleCount; i++)
                 {
@@ -1688,6 +1736,8 @@ namespace BibataIceTrail
                             float dx = (px + 0.5f) - rx;
                             float dist = (float)Math.Sqrt(dx * dx + dy2);
                             int idx = rowOffset + px;
+                            bool updated = false;
+                            bool useInnerOffset = false;
 
                             float d1 = dist - rOuter;
                             if (d1 < 0.0f) d1 = -d1;
@@ -1695,7 +1745,11 @@ namespace BibataIceTrail
                             {
                                 float nh = 1.0f - d1 / ringHaloW;
                                 float hVal = nh * nh * nh * fade;
-                                if (hVal > pHalo[idx]) pHalo[idx] = hVal;
+                                if (hVal > pHalo[idx])
+                                {
+                                    pHalo[idx] = hVal;
+                                    updated = true;
+                                }
 
                                 if (d1 < ringCoreW)
                                 {
@@ -1713,7 +1767,12 @@ namespace BibataIceTrail
                                 {
                                     float nh2 = 1.0f - d2 / ringHaloW2;
                                     float hVal2 = nh2 * nh2 * nh2 * fade2;
-                                    if (hVal2 > pHalo[idx]) pHalo[idx] = hVal2;
+                                    if (hVal2 > pHalo[idx])
+                                    {
+                                        pHalo[idx] = hVal2;
+                                        updated = true;
+                                        useInnerOffset = true;
+                                    }
 
                                     if (d2 < ringCoreW2)
                                     {
@@ -1728,7 +1787,12 @@ namespace BibataIceTrail
                             {
                                 float nf = 1.0f - dist / flashR;
                                 float fhVal = nf * nf * nf * flashFade * 0.85f;
-                                if (fhVal > pHalo[idx]) pHalo[idx] = fhVal;
+                                if (fhVal > pHalo[idx])
+                                {
+                                    pHalo[idx] = fhVal;
+                                    updated = true;
+                                    useInnerOffset = false;
+                                }
 
                                 if (dist < flashCoreR)
                                 {
@@ -1736,6 +1800,13 @@ namespace BibataIceTrail
                                     float fcVal = (nfc * nfc * (3.0f - 2.0f * nfc)) * flashFade * 0.90f;
                                     if (fcVal > pCore[idx]) pCore[idx] = fcVal;
                                 }
+                            }
+
+                            if (trackColor && updated)
+                            {
+                                float ap = (float)(Math.Atan2((double)dy, (double)dx) * (1.0 / (2.0 * Math.PI)) + 0.5);
+                                if (useInnerOffset) ap += 0.5f;
+                                pColor[idx] = ap;
                             }
                         }
                     }
@@ -1751,7 +1822,8 @@ namespace BibataIceTrail
             int cursorX,
             int cursorY,
             float progress,
-            float scale)
+            float scale,
+            bool trackColor)
         {
             float fadeIn = SmoothStep(0.0f, 0.14f, progress);
             float inv = 1.0f - progress;
@@ -1782,6 +1854,7 @@ namespace BibataIceTrail
 
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
+            fixed (float* pColor = _colorBuf)
             {
                 for (int py = y0; py <= y1; py++)
                 {
@@ -1793,6 +1866,7 @@ namespace BibataIceTrail
                         float dx = (px + 0.5f) - cx;
                         float dist = (float)Math.Sqrt(dx * dx + dy2);
                         int idx = rowOffset + px;
+                        bool updated = false;
 
                         float dRing = dist - ringR;
                         if (dRing < 0.0f) dRing = -dRing;
@@ -1800,7 +1874,11 @@ namespace BibataIceTrail
                         {
                             float nh = 1.0f - dRing / ringHaloW;
                             float hVal = nh * nh * nh * alphaEnv;
-                            if (hVal > pHalo[idx]) pHalo[idx] = hVal;
+                            if (hVal > pHalo[idx])
+                            {
+                                pHalo[idx] = hVal;
+                                updated = true;
+                            }
 
                             if (dRing < ringCoreW)
                             {
@@ -1814,7 +1892,16 @@ namespace BibataIceTrail
                         {
                             float na = 1.0f - dist / auraR;
                             float auraVal = na * na * alphaEnv * 0.24f;
-                            if (auraVal > pHalo[idx]) pHalo[idx] = auraVal;
+                            if (auraVal > pHalo[idx])
+                            {
+                                pHalo[idx] = auraVal;
+                                updated = true;
+                            }
+                        }
+
+                        if (trackColor && updated)
+                        {
+                            pColor[idx] = (float)(Math.Atan2((double)dy, (double)dx) * (1.0 / (2.0 * Math.PI)) + 0.5);
                         }
                     }
                 }
@@ -1830,7 +1917,8 @@ namespace BibataIceTrail
             int cursorY,
             float dragAlpha,
             float phaseSec,
-            float scale)
+            float scale,
+            bool trackColor)
         {
             float breath = 0.86f + 0.14f * (float)Math.Sin((double)phaseSec * 6.0);
             float haloR = 15.5f * scale * breath;
@@ -1855,6 +1943,7 @@ namespace BibataIceTrail
 
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
+            fixed (float* pColor = _colorBuf)
             {
                 for (int py = y0; py <= y1; py++)
                 {
@@ -1872,7 +1961,14 @@ namespace BibataIceTrail
 
                         float nh = 1.0f - dist / haloR;
                         float hVal = nh * nh * nh * haloMax;
-                        if (hVal > pHalo[idx]) pHalo[idx] = hVal;
+                        if (hVal > pHalo[idx])
+                        {
+                            pHalo[idx] = hVal;
+                            if (trackColor)
+                            {
+                                pColor[idx] = (float)(Math.Atan2((double)dy, (double)dx) * (1.0 / (2.0 * Math.PI)) + 0.5);
+                            }
+                        }
 
                         if (dist < coreR)
                         {
@@ -1885,14 +1981,16 @@ namespace BibataIceTrail
             }
         }
 
-        private unsafe int CompositePremultiplied(int bboxW, int bboxH, TrailPreset preset, ColorPalette palette)
+        private unsafe int CompositePremultiplied(int bboxW, int bboxH, TrailPreset preset, ColorPalette palette, float timeSec)
         {
             uint* dibBase = (uint*)_dibBits.ToPointer();
             int dibStride = _dibWidth;
             int nonZeroCount = 0;
+            bool isDynamic = (palette.Mode != PaletteMode.Solid);
 
             fixed (float* pHalo = _haloBuf)
             fixed (float* pCore = _coreBuf)
+            fixed (float* pColor = _colorBuf)
             {
                 for (int y = 0; y < bboxH; y++)
                 {
@@ -1903,8 +2001,10 @@ namespace BibataIceTrail
                         int idx = bufRow + x;
                         float h = pHalo[idx];
                         float c = pCore[idx];
+                        float colorParam = isDynamic ? pColor[idx] : 0.0f;
                         pHalo[idx] = 0.0f;
                         pCore[idx] = 0.0f;
+                        if (isDynamic) pColor[idx] = 0.0f;
 
                         if (h <= 0.001f && c <= 0.001f)
                         {
@@ -1925,10 +2025,21 @@ namespace BibataIceTrail
                             continue;
                         }
 
+                        float hr = palette.HaloR;
+                        float hg = palette.HaloG;
+                        float hb = palette.HaloB;
+                        float cr = palette.CoreR;
+                        float cg = palette.CoreG;
+                        float cb = palette.CoreB;
+                        if (isDynamic)
+                        {
+                            EvaluateDynamicColor(palette.Mode, colorParam, timeSec, out hr, out hg, out hb, out cr, out cg, out cb);
+                        }
+
                         float invA = 1.0f / aOut;
-                        float r = (palette.CoreR * ac + palette.HaloR * ah * oneMinusAc) * invA;
-                        float g = (palette.CoreG * ac + palette.HaloG * ah * oneMinusAc) * invA;
-                        float b = (palette.CoreB * ac + palette.HaloB * ah * oneMinusAc) * invA;
+                        float r = (cr * ac + hr * ah * oneMinusAc) * invA;
+                        float g = (cg * ac + hg * ah * oneMinusAc) * invA;
+                        float b = (cb * ac + hb * ah * oneMinusAc) * invA;
 
                         int aInt = (int)(aOut * 255.0f + 0.5f);
                         if (aInt > 255) aInt = 255;
@@ -1948,6 +2059,56 @@ namespace BibataIceTrail
                 }
             }
             return nonZeroCount;
+        }
+
+        private static void EvaluateDynamicColor(
+            PaletteMode mode,
+            float colorParam,
+            float timeSec,
+            out float hr,
+            out float hg,
+            out float hb,
+            out float cr,
+            out float cg,
+            out float cb)
+        {
+            if (mode == PaletteMode.PinkBlue)
+            {
+                float s = 0.5f + 0.5f * (float)Math.Sin((double)(colorParam + timeSec * 0.22f) * 2.0 * Math.PI);
+                hr = 0.22f + 0.78f * s;
+                hg = 0.72f - 0.32f * s;
+                hb = 1.00f - 0.22f * s;
+                cr = hr + (1.0f - hr) * 0.78f;
+                cg = hg + (1.0f - hg) * 0.78f;
+                cb = hb + (1.0f - hb) * 0.78f;
+                return;
+            }
+
+            float hue = colorParam + timeSec * 0.28f;
+            hue = hue - (float)Math.Floor((double)hue);
+            HsvToRgb(hue, 0.76f, 1.0f, out hr, out hg, out hb);
+            cr = hr + (1.0f - hr) * 0.74f;
+            cg = hg + (1.0f - hg) * 0.74f;
+            cb = hb + (1.0f - hb) * 0.74f;
+        }
+
+        private static void HsvToRgb(float h, float s, float v, out float r, out float g, out float b)
+        {
+            float scaled = h * 6.0f;
+            int sector = (int)Math.Floor((double)scaled);
+            float f = scaled - (float)sector;
+            float p = v * (1.0f - s);
+            float q = v * (1.0f - f * s);
+            float t = v * (1.0f - (1.0f - f) * s);
+            switch (sector % 6)
+            {
+                case 0: r = v; g = t; b = p; break;
+                case 1: r = q; g = v; b = p; break;
+                case 2: r = p; g = v; b = t; break;
+                case 3: r = p; g = q; b = v; break;
+                case 4: r = t; g = p; b = v; break;
+                default: r = v; g = p; b = q; break;
+            }
         }
 
         private void DisposeDibOnly()
@@ -2499,6 +2660,8 @@ namespace BibataIceTrail
         private ToolStripMenuItem _itemColorIce;
         private ToolStripMenuItem _itemColorCyan;
         private ToolStripMenuItem _itemColorFrost;
+        private ToolStripMenuItem _itemColorPinkBlue;
+        private ToolStripMenuItem _itemColorRainbow;
         private ToolStripMenuItem _itemColorCustom;
         private ToolStripMenuItem _itemFullscreen;
         private ToolStripMenuItem _itemHotkeyEnabled;
@@ -2573,11 +2736,17 @@ namespace BibataIceTrail
             _itemColorCyan.Click += delegate { SetPalette(PaletteKind.Cyan); };
             _itemColorFrost = new ToolStripMenuItem("霜白 Frost");
             _itemColorFrost.Click += delegate { SetPalette(PaletteKind.Frost); };
+            _itemColorPinkBlue = new ToolStripMenuItem("粉蓝幻梦 Pink-Blue");
+            _itemColorPinkBlue.Click += delegate { SetPalette(PaletteKind.PinkBlue); };
+            _itemColorRainbow = new ToolStripMenuItem("流光七彩 Rainbow");
+            _itemColorRainbow.Click += delegate { SetPalette(PaletteKind.Rainbow); };
             _itemColorCustom = new ToolStripMenuItem("自定义颜色...");
             _itemColorCustom.Click += delegate { PickCustomColor(); };
             colorRoot.DropDownItems.Add(_itemColorIce);
             colorRoot.DropDownItems.Add(_itemColorCyan);
             colorRoot.DropDownItems.Add(_itemColorFrost);
+            colorRoot.DropDownItems.Add(_itemColorPinkBlue);
+            colorRoot.DropDownItems.Add(_itemColorRainbow);
             colorRoot.DropDownItems.Add(new ToolStripSeparator());
             colorRoot.DropDownItems.Add(_itemColorCustom);
             menu.Items.Add(colorRoot);
@@ -2779,6 +2948,8 @@ namespace BibataIceTrail
             _itemColorIce.Checked = _config.Palette == PaletteKind.Ice;
             _itemColorCyan.Checked = _config.Palette == PaletteKind.Cyan;
             _itemColorFrost.Checked = _config.Palette == PaletteKind.Frost;
+            _itemColorPinkBlue.Checked = _config.Palette == PaletteKind.PinkBlue;
+            _itemColorRainbow.Checked = _config.Palette == PaletteKind.Rainbow;
             _itemColorCustom.Checked = _config.Palette == PaletteKind.Custom;
             _itemColorCustom.Text = _config.Palette == PaletteKind.Custom
                 ? string.Format(CultureInfo.InvariantCulture, "自定义颜色 ({0})...", _config.CustomColorHex)
@@ -3145,16 +3316,81 @@ namespace BibataIceTrail
                     AppConfig defaultCfg = new AppConfig(string.Empty);
                     bool silentDefaultOk = (!defaultCfg.ShowTrayIcon && defaultCfg.HotkeyEnabled);
 
+                    // PinkBlue dynamic gradient self-test
+                    ColorPalette pbPal = AppConfig.GetPalette(PaletteKind.PinkBlue, "#A78BFA");
+                    int pbx, pby, pbw, pbh;
+                    bool pbOk = renderer.RenderFrame(samples, samples.Length, true, ripples, ripples.Length, true, 720, 300, -1.0f, 0.0f, 0.0f, nowTicks, 144, preset, pbPal, out pbx, out pby, out pbw, out pbh);
+                    int pbPixels = 0;
+                    bool pbHasPink = false;
+                    bool pbHasBlue = false;
+                    if (pbOk && renderer.DibBits != IntPtr.Zero)
+                    {
+                        uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+                        int stride = renderer.DibWidth;
+                        for (int y = 0; y < pbh; y++)
+                        {
+                            uint* row = dibBase + y * stride;
+                            for (int x = 0; x < pbw; x++)
+                            {
+                                uint px = row[x];
+                                byte a = (byte)(px >> 24);
+                                byte r = (byte)((px >> 16) & 0xFF);
+                                byte g = (byte)((px >> 8) & 0xFF);
+                                byte b = (byte)(px & 0xFF);
+                                if (a > 0) pbPixels++;
+                                if (r > a || g > a || b > a) alphaViolations++;
+                                if ((int)r > (int)b + 8) pbHasPink = true;
+                                if ((int)b > (int)r + 8) pbHasBlue = true;
+                            }
+                        }
+                    }
+                    bool pinkBlueGradientOk = pbOk && pbPixels >= 100 && pbHasPink && pbHasBlue;
+
+                    // Rainbow dynamic gradient self-test
+                    ColorPalette rbPal = AppConfig.GetPalette(PaletteKind.Rainbow, "#A78BFA");
+                    int rbx, rby, rbw, rbh;
+                    bool rbOk = renderer.RenderFrame(samples, samples.Length, true, ripples, ripples.Length, true, 720, 300, -1.0f, 0.0f, 0.0f, nowTicks, 144, preset, rbPal, out rbx, out rby, out rbw, out rbh);
+                    int rbPixels = 0;
+                    int maxRB = 0;
+                    int maxBR = 0;
+                    int maxGR = 0;
+                    if (rbOk && renderer.DibBits != IntPtr.Zero)
+                    {
+                        uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+                        int stride = renderer.DibWidth;
+                        for (int y = 0; y < rbh; y++)
+                        {
+                            uint* row = dibBase + y * stride;
+                            for (int x = 0; x < rbw; x++)
+                            {
+                                uint px = row[x];
+                                byte a = (byte)(px >> 24);
+                                byte r = (byte)((px >> 16) & 0xFF);
+                                byte g = (byte)((px >> 8) & 0xFF);
+                                byte b = (byte)(px & 0xFF);
+                                if (a > 0) rbPixels++;
+                                if (r > a || g > a || b > a) alphaViolations++;
+                                int diffRB = (int)r - (int)b;
+                                int diffBR = (int)b - (int)r;
+                                int diffGR = (int)g - (int)r;
+                                if (diffRB > maxRB) maxRB = diffRB;
+                                if (diffBR > maxBR) maxBR = diffBR;
+                                if (diffGR > maxGR) maxGR = diffGR;
+                            }
+                        }
+                    }
+                    bool rainbowGradientOk = rbOk && rbPixels >= 100 && maxRB > 12 && maxBR > 12 && maxGR > 12;
+
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} silentDefaultOk={13} headerSize={14} alphaViolations={15} elapsedMs={16:F3} fullscreenBusy={17} ulwOk={18} ulwErr={19} ridOk={20} ridErr={21}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} silentDefaultOk={15} headerSize={16} alphaViolations={17} elapsedMs={18:F3} fullscreenBusy={19} ulwOk={20} ulwErr={21} ridOk={22} ridErr={23}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
                     {
                         return 1;
                     }

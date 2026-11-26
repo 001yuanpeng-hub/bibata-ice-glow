@@ -5,6 +5,8 @@ param(
     [string]$Style = "Modern",
     [ValidateSet("Regular", "Large", "Extra-Large")]
     [string]$Size = "Regular",
+    [ValidateSet("", "Ice", "Cyan", "Frost", "PinkBlue", "Rainbow")]
+    [string]$Palette = "",
     [switch]$SkipCursor,
     [switch]$SkipTrail,
     [switch]$NoAutoStart,
@@ -173,6 +175,40 @@ if (-not $SkipTrail) {
     }
     if ($testProc.ExitCode -ne 0) {
         throw "BibataIceTrail --self-test failed with exit code $($testProc.ExitCode)."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Palette)) {
+        $paletteMap = @{
+            Ice      = "0"
+            Cyan     = "1"
+            Frost    = "2"
+            PinkBlue = "4"
+            Rainbow  = "5"
+        }
+        $pVal = $paletteMap[$Palette]
+        $cfgPath = Join-Path $trailDir "config.ini"
+        if (Test-Path $cfgPath) {
+            $lines = Get-Content -Path $cfgPath -Encoding UTF8
+            $updated = $false
+            $outLines = New-Object System.Collections.Generic.List[string]
+            foreach ($line in $lines) {
+                if ($line -match '^\s*Palette\s*=') {
+                    $outLines.Add("Palette=$pVal")
+                    $updated = $true
+                }
+                else {
+                    $outLines.Add($line)
+                }
+            }
+            if (-not $updated) {
+                $outLines.Add("Palette=$pVal")
+            }
+            Set-Content -Path $cfgPath -Value $outLines -Encoding UTF8
+        }
+        else {
+            Set-Content -Path $cfgPath -Value @("[BibataIceTrail]", "Palette=$pVal") -Encoding UTF8
+        }
+        Write-Host "Configured palette: $Palette (Palette=$pVal)" -ForegroundColor Green
     }
 
     if (-not $NoAutoStart) {
