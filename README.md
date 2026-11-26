@@ -64,7 +64,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -SingleSize
 ```
 
 - 默认安装路径：若存在 `D:\Software` 则装入 `D:\Software\Cursors`，否则自动装入 `%LOCALAPPDATA%\BibataIceGlow`。
-- 仓库只包含透明源码与脚本，安装时会自动调用 Windows 内置的 `.NET Framework 4.x csc.exe` 在本地编译出 `BibataIceTrail.exe` 并运行 `--self-test` 自检。
+- 仓库只包含透明源码与脚本，安装/升级时会自动在临时目录先编译候选 `BibataIceTrail.exe` 并运行 `--self-test` 自检，通过后再替换正式文件；若替换或启动失败会自动回滚旧版并保留现有 `config.ini`。
+- 安装器会在安装目录记录 `bibata-ice-glow-manifest.json`（包含安装前的原始指针快照和托管组件清单）：
+  - 使用 `-SkipCursor` 安装或升级时，后续卸载仅清理光效程序与自启动，保留用户原有指针与主题文件；
+  - 完整安装后若未更换主题，卸载时还原安装前的指针设置；若用户已主动切换到其他主题，卸载时会保留用户当前选择。
 
 ### 一键卸载并还原默认指针
 

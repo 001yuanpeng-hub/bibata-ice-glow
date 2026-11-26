@@ -2662,6 +2662,11 @@ namespace BibataIceTrail
                         _buffer.Clear();
                         _ripples.Clear();
                         _interaction.Clear();
+                        if (fullscreenPaused && enabled && (trailEnabled || rippleEnabled || dragEnabled || shakeEnabled || scrollEnabled))
+                        {
+                            if (_stopEvent.WaitOne(250)) break;
+                            continue;
+                        }
                         uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, NativeMethods.INFINITE, NativeMethods.QS_ALLINPUT);
                         if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) break;
                         continue;
@@ -2710,8 +2715,18 @@ namespace BibataIceTrail
                         continue;
                     }
 
-                    int dpiX = gotCursor ? curPt.X : ((count >= 2) ? snapshot[count - 1].X : rippleSnapshot[rippleCount - 1].X);
-                    int dpiY = gotCursor ? curPt.Y : ((count >= 2) ? snapshot[count - 1].Y : rippleSnapshot[rippleCount - 1].Y);
+                    int dpiX, dpiY;
+                    if (!TryResolveAnchorPoint(gotCursor, curPt.X, curPt.Y, snapshot, count, rippleSnapshot, rippleCount, out dpiX, out dpiY))
+                    {
+                        if (!WaitAndHandleIdle(
+                            renderer, waitHandles, nowTicks, trimDelayTicks,
+                            trailEnabled, shakeEnabled, dragEnabled,
+                            ref isShown, ref idleSinceTicks, ref lastIdleX, ref lastIdleY))
+                        {
+                            break;
+                        }
+                        continue;
+                    }
                     uint dpi = NativeMethods.GetDpiAtPoint(dpiX, dpiY);
 
                     int bx, by, bw, bh;
@@ -2804,6 +2819,40 @@ namespace BibataIceTrail
                 NativeMethods.DestroyWindow(_hwnd);
                 _hwnd = IntPtr.Zero;
             }
+        }
+
+        internal static bool TryResolveAnchorPoint(
+            bool gotCursor,
+            int curX,
+            int curY,
+            TrailSample[] snapshot,
+            int count,
+            ClickRipple[] ripples,
+            int rippleCount,
+            out int outX,
+            out int outY)
+        {
+            if (gotCursor)
+            {
+                outX = curX;
+                outY = curY;
+                return true;
+            }
+            if (snapshot != null && count > 0)
+            {
+                outX = snapshot[count - 1].X;
+                outY = snapshot[count - 1].Y;
+                return true;
+            }
+            if (ripples != null && rippleCount > 0)
+            {
+                outX = ripples[rippleCount - 1].X;
+                outY = ripples[rippleCount - 1].Y;
+                return true;
+            }
+            outX = 0;
+            outY = 0;
+            return false;
         }
 
         private bool WaitAndHandleIdle(
@@ -3752,25 +3801,43 @@ namespace BibataIceTrail
                 return RunSelfTest(logPath);
             }
 
+            bool forceShowTray = false;
+            string instanceSuffix = "SingleInstance";
+            if (args != null)
+            {
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (string.Equals(args[i], "--show-tray", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(args[i], "--tray", StringComparison.OrdinalIgnoreCase))
+                    {
+                        forceShowTray = true;
+                    }
+                    else if (string.Equals(args[i], "--instance-name", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                    {
+                        string rawName = args[++i];
+                        StringBuilder clean = new StringBuilder();
+                        for (int c = 0; c < rawName.Length && clean.Length < 40; c++)
+                        {
+                            char ch = rawName[c];
+                            if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-')
+                            {
+                                clean.Append(ch);
+                            }
+                        }
+                        if (clean.Length > 0)
+                        {
+                            instanceSuffix = clean.ToString();
+                        }
+                    }
+                }
+            }
+
             bool createdNew;
-            using (Mutex mutex = new Mutex(true, "Local\\BibataIceTrail_SingleInstance", out createdNew))
+            using (Mutex mutex = new Mutex(true, "Local\\BibataIceTrail_" + instanceSuffix, out createdNew))
             {
                 if (!createdNew)
                 {
                     return 0;
-                }
-
-                bool forceShowTray = false;
-                if (args != null)
-                {
-                    for (int i = 0; i < args.Length; i++)
-                    {
-                        if (string.Equals(args[i], "--show-tray", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(args[i], "--tray", StringComparison.OrdinalIgnoreCase))
-                        {
-                            forceShowTray = true;
-                        }
-                    }
                 }
 
                 Application.EnableVisualStyles();
@@ -4174,16 +4241,46 @@ namespace BibataIceTrail
                         string.Equals(CursorSizeManager.GetNextSize("Large"), "Extra-Large", StringComparison.Ordinal) &&
                         string.Equals(CursorSizeManager.GetNextSize("Extra-Large"), "Regular", StringComparison.Ordinal);
 
+                    int ax, ay;
+                    bool noAnchor = OverlayEngine.TryResolveAnchorPoint(false, 0, 0, samples, 0, ripples, 0, out ax, out ay);
+                    bool oneSampleAnchor = OverlayEngine.TryResolveAnchorPoint(false, 0, 0, samples, 1, ripples, 0, out ax, out ay) &&
+                                           ax == samples[0].X && ay == samples[0].Y;
+                    bool nextValidAnchor = OverlayEngine.TryResolveAnchorPoint(true, 500, 400, samples, 0, ripples, 0, out ax, out ay) &&
+                                           ax == 500 && ay == 400;
+                    int rvx, rvy, rvw, rvh;
+                    bool nextFrameOk = renderer.RenderFrame(null, 0, false, null, 0, false, ax, ay, -1.0f, 0.0f, 0.0f, 1, 0.25f, 0.30f, nowTicks, 144, preset, palette, out rvx, out rvy, out rvw, out rvh);
+                    int nextPixels = 0;
+                    if (nextFrameOk && renderer.DibBits != IntPtr.Zero)
+                    {
+                        uint* dibBase = (uint*)renderer.DibBits.ToPointer();
+                        int stride = renderer.DibWidth;
+                        for (int y = 0; y < rvh; y++)
+                        {
+                            uint* row = dibBase + y * stride;
+                            for (int x = 0; x < rvw; x++)
+                            {
+                                uint px = row[x];
+                                byte a = (byte)(px >> 24);
+                                byte r = (byte)((px >> 16) & 0xFF);
+                                byte g = (byte)((px >> 8) & 0xFF);
+                                byte b = (byte)(px & 0xFF);
+                                if (a > 0) nextPixels++;
+                                if (r > a || g > a || b > a) alphaViolations++;
+                            }
+                        }
+                    }
+                    bool missingAnchorOk = !noAnchor && oneSampleAnchor && nextValidAnchor && nextFrameOk && nextPixels >= 80;
+
                     report.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} cursorSizeLogicOk={18} silentDefaultOk={19} headerSize={20} alphaViolations={21} elapsedMs={22:F3} fullscreenBusy={23} ulwOk={24} ulwErr={25} ridOk={26} ridErr={27}",
-                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
+                        "ok={0} bbox=({1},{2},{3},{4}) nonZeroPixels={5} clickOnlyOk={6} clickPixels={7} extraOk={8} extraPixels={9} shakeDetected={10} falseShake={11} customPaletteOk={12} pinkBlueGradientOk={13} rainbowGradientOk={14} scrollArcOk={15} previewOk={16} trimRecoverOk={17} missingAnchorOk={18} cursorSizeLogicOk={19} silentDefaultOk={20} headerSize={21} alphaViolations={22} elapsedMs={23:F3} fullscreenBusy={24} ulwOk={25} ulwErr={26} ridOk={27} ridErr={28}",
+                        ok, bx, by, bw, bh, nonZeroPixels, clickOnlyOk, clickPixels, extraOk, extraPixels, shakeDetected, falseShake, customPaletteOk, pinkBlueGradientOk, rainbowGradientOk, scrollArcOk, previewOk, trimRecoverOk, missingAnchorOk, cursorSizeLogicOk, silentDefaultOk, headerSize, alphaViolations, sw.Elapsed.TotalMilliseconds, fullscreenBusy, ulwOk, ulwErr, ridOk, ridErr));
 
                     if (!string.IsNullOrEmpty(logPath))
                     {
                         File.WriteAllText(logPath, report.ToString(), Encoding.UTF8);
                     }
 
-                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !trimRecoverOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || fullscreenBusy || !ulwOk || !ridOk)
+                    if (!ok || nonZeroPixels < 100 || !clickOnlyOk || clickPixels < 100 || !extraOk || extraPixels < 100 || !shakeDetected || falseShake || !customPaletteOk || !pinkBlueGradientOk || !rainbowGradientOk || !scrollArcOk || !previewOk || !trimRecoverOk || !missingAnchorOk || !cursorSizeLogicOk || !silentDefaultOk || !headerOk || alphaViolations != 0 || !ulwOk || !ridOk)
                     {
                         return 1;
                     }
