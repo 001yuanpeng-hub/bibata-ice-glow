@@ -1551,6 +1551,24 @@ class FailLaunch {
     }
     Write-Host "PASS Case 28: Prune locks roll back both state files; retry and stale-backup recovery preserve the latest Large scheme"
 
+    # Case 29: -CursorZipPath supports extracted local directory, --diagnose outputs environment, and runtime log is cleaned on uninstall
+    $d29 = Join-Path $testRoot 'case29_offline_dir_and_diag'
+    $r29 = Join-Path $regRoot 'case29'
+    $extracted29 = Join-Path $testRoot 'case29_extracted_pkg'
+    Expand-Archive -Path $fixtureZip -DestinationPath $extracted29 -Force
+    & $installPs1 -InstallDir $d29 -RegistryRoot $r29 -Size Regular -SingleSize -NoLaunch -NoAutoStart -SkipCursorRefresh -SkipTaskScheduler -CursorZipPath $extracted29 | Out-Null
+    $exe29 = Join-Path $d29 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $diagFile29 = Join-Path $testRoot 'case29_diag.txt'
+    $diagProc29 = Start-Process -FilePath $exe29 -ArgumentList @('--diagnose', ('"{0}"' -f $diagFile29)) -Wait -PassThru -WindowStyle Hidden
+    Assert-True ($diagProc29.ExitCode -eq 0 -and (Test-Path -LiteralPath $diagFile29 -PathType Leaf)) "Case 29: --diagnose failed"
+    $diagText29 = Get-Content -LiteralPath $diagFile29 -Raw -Encoding UTF8
+    Assert-True ($diagText29 -match 'BibataIceTrail Diagnostics' -and $diagText29 -match 'Job:' -and $diagText29 -match 'Monitors') "Case 29: --diagnose output missing expected sections"
+    $log29 = Join-Path $d29 'Bibata-Ice-Trail\BibataIceTrail.log'
+    [IO.File]::WriteAllText($log29, "sample runtime log line`r`n")
+    & $uninstallPs1 -InstallDir $d29 -RegistryRoot $r29 -SkipCursorRefresh | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath $log29) -and -not (Test-Path -LiteralPath $d29)) "Case 29: Runtime log or install dir left behind after uninstall"
+    Write-Host "PASS Case 29: -CursorZipPath directory mode, --diagnose output, and runtime log cleanup all pass" -ForegroundColor Green
+
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched
     # =========================================================================

@@ -12,16 +12,40 @@ param(
     [switch]$SkipTrail,
     [switch]$NoAutoStart,
     [switch]$NoLaunch,
+    [Alias("TestCursorZipPath")]
+    [string]$CursorZipPath = "",
+    [string]$Version = "",
     [string]$RegistryRoot = "HKCU:",
     [switch]$SkipCursorRefresh,
     [switch]$SkipTaskScheduler,
     [string]$TestSourceOverride = "",
-    [string]$LaunchArgs = "",
-    [string]$TestCursorZipPath = ""
+    [string]$LaunchArgs = ""
 )
 
 $ErrorActionPreference = "Stop"
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+catch {
+}
 . (Join-Path $PSScriptRoot "src\InstallState.ps1")
+
+function Clear-StaleBibataStagingDirs {
+    try {
+        $cutoff = (Get-Date).AddHours(-24)
+        $patterns = @("bibata_ice_stage_*", "bibata_cursor_stage_*", "bibata_cursor_bak_*")
+        foreach ($pat in $patterns) {
+            $dirs = @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter $pat -ErrorAction SilentlyContinue)
+            foreach ($d in $dirs) {
+                if ($d.LastWriteTime -lt $cutoff) {
+                    Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+    catch {
+    }
+}
 
 function Normalize-BibataPath([string]$p) {
     if ([string]::IsNullOrWhiteSpace($p)) { return "" }
@@ -524,7 +548,7 @@ function Start-BibataInstance([string]$exePath, [string]$workDir, [string]$extra
         }
     }
 
-    $launchedViaTask = $false
+    $launchedDetached = $false
     if (-not $NoTaskScheduler) {
         try {
             $taskName = "BibataIceTrailOneShotLaunch"
@@ -540,14 +564,33 @@ function Start-BibataInstance([string]$exePath, [string]$workDir, [string]$extra
             Start-ScheduledTask -TaskName $taskName
             Start-Sleep -Milliseconds 800
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-            $launchedViaTask = $true
+            if (@(Get-BibataProcessesByExe $exePath).Count -gt 0) {
+                $launchedDetached = $true
+            }
         }
         catch {
-            $launchedViaTask = $false
+            $launchedDetached = $false
+        }
+
+        if (-not $launchedDetached -and $argTokens.Count -eq 0) {
+            try {
+                # Explorer launches the EXE under the desktop shell process, breaking out of caller Job Objects (KILL_ON_JOB_CLOSE).
+                Start-Process -FilePath "explorer.exe" -ArgumentList "`"$exePath`"" | Out-Null
+                for ($attempt = 0; $attempt -lt 6; $attempt++) {
+                    Start-Sleep -Milliseconds 300
+                    if (@(Get-BibataProcessesByExe $exePath).Count -gt 0) {
+                        $launchedDetached = $true
+                        break
+                    }
+                }
+            }
+            catch {
+                $launchedDetached = $false
+            }
         }
     }
 
-    if (-not $launchedViaTask) {
+    if (-not $launchedDetached) {
         if ($argTokens.Count -gt 0) {
             Start-Process -FilePath $exePath -ArgumentList $argTokens.ToArray() -WorkingDirectory $workDir | Out-Null
         }
@@ -555,6 +598,9 @@ function Start-BibataInstance([string]$exePath, [string]$workDir, [string]$extra
             Start-Process -FilePath $exePath -WorkingDirectory $workDir | Out-Null
         }
         Start-Sleep -Milliseconds 500
+        if (-not $NoTaskScheduler) {
+            Write-Warning "Could not launch BibataIceTrail detached from the current shell/job; if this installer ran inside an AI agent or sandbox job, the process may exit when the host closes. Start '$exePath' directly from Explorer or sign out and back in."
+        }
     }
 
     $alive = @(Get-BibataProcessesByExe $exePath)
@@ -562,6 +608,8 @@ function Start-BibataInstance([string]$exePath, [string]$workDir, [string]$extra
         throw "BibataIceTrail failed to stay running after launch: $exePath"
     }
 }
+
+Clear-StaleBibataStagingDirs
 
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     if (Test-Path "D:\Software") {
@@ -572,8 +620,8 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     }
 }
 $InstallDir = Resolve-BibataAbsolutePath $InstallDir
-if (-not [string]::IsNullOrWhiteSpace($TestCursorZipPath)) {
-    $TestCursorZipPath = Resolve-BibataAbsolutePath $TestCursorZipPath
+if (-not [string]::IsNullOrWhiteSpace($CursorZipPath)) {
+    $CursorZipPath = Resolve-BibataAbsolutePath $CursorZipPath
 }
 if (-not [string]::IsNullOrWhiteSpace($TestSourceOverride)) {
     $TestSourceOverride = Resolve-BibataAbsolutePath $TestSourceOverride
@@ -727,7 +775,12 @@ try {
     if (-not $SkipCursor) {
         $themeName = "Bibata-$Style-Ice"
         $themeRoot = Join-Path $InstallDir $themeName
-        $zipUrl = "https://github.com/ful1e5/Bibata_Cursor/releases/latest/download/$themeName-Windows.zip"
+        $zipUrl = if (-not [string]::IsNullOrWhiteSpace($Version)) {
+            "https://github.com/ful1e5/Bibata_Cursor/releases/download/$Version/$themeName-Windows.zip"
+        }
+        else {
+            "https://github.com/ful1e5/Bibata_Cursor/releases/latest/download/$themeName-Windows.zip"
+        }
         $sizeDirName = "$themeName-$Size-Windows"
         $cursorDir = Join-Path $themeRoot $sizeDirName
         $schemeName = "$themeName ($Size)"
@@ -751,28 +804,61 @@ try {
             $cursorStageExtract = Join-Path $cursorStageDir "extracted"
             New-Item -ItemType Directory -Path $cursorStageExtract -Force | Out-Null
             $stagedZipPath = Join-Path $cursorStageDir "$themeName-Windows.zip"
+            $copiedFromDir = $false
 
-            if (-not [string]::IsNullOrWhiteSpace($TestCursorZipPath) -and (Test-Path -LiteralPath $TestCursorZipPath)) {
-                Copy-Item -LiteralPath $TestCursorZipPath -Destination $stagedZipPath -Force
+            if (-not [string]::IsNullOrWhiteSpace($CursorZipPath)) {
+                if (Test-Path -LiteralPath $CursorZipPath -PathType Container) {
+                    Write-Host "Staging cursor files from local directory: $CursorZipPath" -ForegroundColor Yellow
+                    $localSizeDirs = @(Get-ChildItem -LiteralPath $CursorZipPath -Directory -Filter "$themeName-*-Windows" -ErrorAction SilentlyContinue)
+                    if ($localSizeDirs.Count -gt 0) {
+                        foreach ($lsd in $localSizeDirs) {
+                            Copy-Item -LiteralPath $lsd.FullName -Destination (Join-Path $cursorStageExtract $lsd.Name) -Recurse -Force
+                        }
+                    }
+                    elseif (Test-Path -LiteralPath (Join-Path $CursorZipPath "Pointer.cur") -PathType Leaf) {
+                        Copy-Item -LiteralPath $CursorZipPath -Destination (Join-Path $cursorStageExtract $sizeDirName) -Recurse -Force
+                    }
+                    else {
+                        throw "Local cursor directory '$CursorZipPath' does not contain '$sizeDirName' or cursor files."
+                    }
+                    $copiedFromDir = $true
+                }
+                elseif (Test-Path -LiteralPath $CursorZipPath -PathType Leaf) {
+                    Copy-Item -LiteralPath $CursorZipPath -Destination $stagedZipPath -Force
+                }
+                else {
+                    throw "Cursor package path not found: $CursorZipPath"
+                }
             }
             else {
-                Write-Host "Downloading $themeName from GitHub Releases..." -ForegroundColor Yellow
+                Write-Host "Downloading $themeName from GitHub Releases ($zipUrl)..." -ForegroundColor Yellow
+                $downloadErr = ""
                 if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
                     & curl.exe -L --fail --retry 3 -o $stagedZipPath $zipUrl
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Failed to download $zipUrl (curl exit $LASTEXITCODE)."
+                        $downloadErr = "curl.exe exited with code $LASTEXITCODE"
                     }
                 }
                 else {
-                    Invoke-WebRequest -Uri $zipUrl -OutFile $stagedZipPath -UseBasicParsing
+                    try {
+                        Invoke-WebRequest -Uri $zipUrl -OutFile $stagedZipPath -UseBasicParsing
+                    }
+                    catch {
+                        $downloadErr = $_.Exception.Message
+                    }
+                }
+                if (-not [string]::IsNullOrEmpty($downloadErr)) {
+                    throw "Failed to download $zipUrl ($downloadErr). If behind a proxy or restricted network, set HTTP_PROXY/HTTPS_PROXY or manually download the ZIP from $zipUrl and rerun with: .\install.ps1 -CursorZipPath `"<path-to-zip-or-extracted-folder>`""
                 }
             }
 
-            Write-Host "Extracting cursor package in staging..." -ForegroundColor Yellow
-            $prevProgress = $ProgressPreference
-            $ProgressPreference = "SilentlyContinue"
-            Expand-Archive -Path $stagedZipPath -DestinationPath $cursorStageExtract -Force
-            $ProgressPreference = $prevProgress
+            if (-not $copiedFromDir) {
+                Write-Host "Extracting cursor package in staging..." -ForegroundColor Yellow
+                $prevProgress = $ProgressPreference
+                $ProgressPreference = "SilentlyContinue"
+                Expand-Archive -Path $stagedZipPath -DestinationPath $cursorStageExtract -Force
+                $ProgressPreference = $prevProgress
+            }
 
             $stagedCursorDir = Join-Path $cursorStageExtract $sizeDirName
             foreach ($role in $roleMap.Keys) {
@@ -1209,6 +1295,8 @@ try {
             $prevTrailExePath = $destExe
             Add-UniquePath $managedTrailFiles $destExe
             Add-UniquePath $managedTrailFiles $destCs
+            Add-UniquePath $managedTrailFiles (Join-Path $trailDir "BibataIceTrail.log")
+            Add-UniquePath $managedTrailFiles (Join-Path $trailDir "BibataIceTrail.log.old")
             # The running app can create config.ini after a -NoLaunch install.
             if ($ownsConfig) { Add-UniquePath $managedTrailFiles $cfgPath }
         }

@@ -782,6 +782,8 @@ if (-not $KeepFiles) {
             $trailTargetFiles = @(
                 $trailExe
                 (Join-Path $trailDir "BibataIceTrail.cs")
+                (Join-Path $trailDir "BibataIceTrail.log")
+                (Join-Path $trailDir "BibataIceTrail.log.old")
             )
         }
 

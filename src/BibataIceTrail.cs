@@ -407,6 +407,7 @@ namespace BibataIceTrail
         public const byte AC_SRC_OVER = 0x00;
         public const byte AC_SRC_ALPHA = 0x01;
 
+        public const uint RIDEV_REMOVE = 0x00000001;
         public const uint RIDEV_INPUTSINK = 0x00000100;
         public const uint RID_INPUT = 0x10000003;
         public const int RIM_TYPEMOUSE = 0;
@@ -544,6 +545,59 @@ namespace BibataIceTrail
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern ushort RegisterClassExW(ref WNDCLASSEXW lpwcx);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool UnregisterClassW(string lpClassName, IntPtr hInstance);
+
+        [DllImport("kernel32.dll")]
+        public static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool IsProcessInJob(IntPtr processHandle, IntPtr jobHandle, out bool result);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool QueryInformationJobObject(
+            IntPtr hJob,
+            int jobObjectInformationClass,
+            out JOBOBJECT_EXTENDED_LIMIT_INFORMATION lpJobObjectInfo,
+            uint cbJobObjectInfoLength,
+            out uint lpReturnLength);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr CreateWindowExW(
@@ -719,6 +773,119 @@ namespace BibataIceTrail
             {
             }
             return false;
+        }
+
+        public static string GetCurrentJobSummary()
+        {
+            try
+            {
+                bool inJob;
+                if (!IsProcessInJob(GetCurrentProcess(), IntPtr.Zero, out inJob))
+                {
+                    return "inJob=Unknown(err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ")";
+                }
+                if (!inJob)
+                {
+                    return "inJob=False";
+                }
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION info;
+                uint retLen;
+                if (QueryInformationJobObject(IntPtr.Zero, 9, out info, (uint)Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION)), out retLen))
+                {
+                    uint flags = info.BasicLimitInformation.LimitFlags;
+                    bool killOnClose = (flags & 0x2000u) != 0;
+                    bool breakawayOk = (flags & 0x0800u) != 0;
+                    return string.Format(
+                        CultureInfo.InvariantCulture,
+                        "inJob=True limitFlags=0x{0:X} killOnClose={1} breakawayOk={2}",
+                        flags, killOnClose, breakawayOk);
+                }
+                return "inJob=True limitFlags=Unknown";
+            }
+            catch
+            {
+                return "inJob=Unavailable";
+            }
+        }
+    }
+
+    internal static class AppLogger
+    {
+        private const long MaxLogBytes = 256 * 1024;
+        private static readonly object _sync = new object();
+        private static string _logPath;
+
+        public static string LogPath
+        {
+            get { return _logPath; }
+        }
+
+        public static void Init(string path)
+        {
+            lock (_sync)
+            {
+                _logPath = path;
+            }
+        }
+
+        public static void Info(string message)
+        {
+            Write("INFO", message);
+        }
+
+        public static void Warn(string message)
+        {
+            Write("WARN", message);
+        }
+
+        public static void Error(string message, Exception ex)
+        {
+            string full = ex == null ? message : (message + " | " + ex.GetType().Name + ": " + ex.Message + " | " + ex.StackTrace);
+            Write("ERROR", full);
+        }
+
+        private static void Write(string level, string message)
+        {
+            try
+            {
+                lock (_sync)
+                {
+                    if (string.IsNullOrEmpty(_logPath)) return;
+                    string dir = Path.GetDirectoryName(_logPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    {
+                        Directory.CreateDirectory(dir);
+                    }
+                    if (File.Exists(_logPath))
+                    {
+                        FileInfo fi = new FileInfo(_logPath);
+                        if (fi.Length >= MaxLogBytes)
+                        {
+                            string oldPath = _logPath + ".old";
+                            try
+                            {
+                                if (File.Exists(oldPath)) File.Delete(oldPath);
+                                File.Move(_logPath, oldPath);
+                            }
+                            catch
+                            {
+                            }
+                        }
+                    }
+                    string line = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "{0:yyyy-MM-dd HH:mm:ss.fff} [{1}] [pid={2}] {3}{4}",
+                        DateTime.Now,
+                        level,
+                        Process.GetCurrentProcess().Id,
+                        message ?? "",
+                        Environment.NewLine);
+                    File.AppendAllText(_logPath, line, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -1876,8 +2043,16 @@ namespace BibataIceTrail
             DisposeDibOnly();
 
             IntPtr screenDC = NativeMethods.GetDC(IntPtr.Zero);
+            if (screenDC == IntPtr.Zero)
+            {
+                return;
+            }
             _memDC = NativeMethods.CreateCompatibleDC(screenDC);
             NativeMethods.ReleaseDC(IntPtr.Zero, screenDC);
+            if (_memDC == IntPtr.Zero)
+            {
+                return;
+            }
 
             NativeMethods.BITMAPINFOHEADER bmi = new NativeMethods.BITMAPINFOHEADER();
             bmi.biSize = (uint)Marshal.SizeOf(typeof(NativeMethods.BITMAPINFOHEADER));
@@ -1888,11 +2063,15 @@ namespace BibataIceTrail
             bmi.biCompression = 0; // BI_RGB
 
             _dibBitmap = NativeMethods.CreateDIBSection(_memDC, ref bmi, 0, out _dibBits, IntPtr.Zero, 0);
-            if (_dibBitmap != IntPtr.Zero)
+            if (_dibBitmap != IntPtr.Zero && _dibBits != IntPtr.Zero)
             {
                 _oldBitmap = NativeMethods.SelectObject(_memDC, _dibBitmap);
                 _dibWidth = newW;
                 _dibHeight = newH;
+            }
+            else
+            {
+                DisposeDibOnly();
             }
         }
 
@@ -2790,7 +2969,11 @@ namespace BibataIceTrail
 
         private void RenderLoop()
         {
-            if (!CreateOverlayWindow()) return;
+            if (!CreateOverlayWindow())
+            {
+                AppLogger.Warn("Failed to create overlay window (err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ").");
+                return;
+            }
 
             using (TrailRenderer renderer = new TrailRenderer())
             {
@@ -2806,6 +2989,11 @@ namespace BibataIceTrail
                 long zRefreshInterval = (long)(0.25 * Stopwatch.Frequency);
                 int lastIdleX = int.MinValue;
                 int lastIdleY = int.MinValue;
+                uint cachedDpi = 96;
+                int cachedDpiX = int.MinValue;
+                int cachedDpiY = int.MinValue;
+                long cachedDpiTicks = 0;
+                long dpiCacheInterval = Stopwatch.Frequency / 5L;
 
                 IntPtr[] waitHandles = new IntPtr[2];
                 waitHandles[0] = _wakeEvent.SafeWaitHandle.DangerousGetHandle();
@@ -2929,7 +3117,17 @@ namespace BibataIceTrail
                         }
                         continue;
                     }
-                    uint dpi = NativeMethods.GetDpiAtPoint(dpiX, dpiY);
+                    long dpiAge = nowTicks - cachedDpiTicks;
+                    int ddx = dpiX - cachedDpiX;
+                    int ddy = dpiY - cachedDpiY;
+                    if (cachedDpiTicks == 0 || dpiAge < 0 || dpiAge >= dpiCacheInterval || ddx > 64 || ddx < -64 || ddy > 64 || ddy < -64)
+                    {
+                        cachedDpi = NativeMethods.GetDpiAtPoint(dpiX, dpiY);
+                        cachedDpiX = dpiX;
+                        cachedDpiY = dpiY;
+                        cachedDpiTicks = nowTicks;
+                    }
+                    uint dpi = cachedDpi;
 
                     int bx, by, bw, bh;
                     bool hasPixels = renderer.RenderFrame(
@@ -3021,6 +3219,7 @@ namespace BibataIceTrail
                 NativeMethods.DestroyWindow(_hwnd);
                 _hwnd = IntPtr.Zero;
             }
+            NativeMethods.UnregisterClassW("BibataIceTrailOverlayClass", NativeMethods.GetModuleHandleW(null));
         }
 
         internal static bool TryResolveAnchorPoint(
@@ -3087,7 +3286,8 @@ namespace BibataIceTrail
                 }
                 idleSinceTicks = nowTicks;
             }
-            uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, 25, NativeMethods.QS_ALLINPUT);
+            uint idleTimeoutMs = (idleSinceTicks != 0 && (nowTicks - idleSinceTicks) >= (Stopwatch.Frequency * 2L)) ? 150u : 25u;
+            uint waitRes = NativeMethods.MsgWaitForMultipleObjects(2, waitHandles, false, idleTimeoutMs, NativeMethods.QS_ALLINPUT);
             if (waitRes == NativeMethods.WAIT_OBJECT_0 + 1) return false;
             NativeMethods.POINT idlePt;
             if (NativeMethods.GetCursorPos(out idlePt) && (idlePt.X != lastIdleX || idlePt.Y != lastIdleY))
@@ -3994,18 +4194,22 @@ namespace BibataIceTrail
                 if (!_hotkeyRegistered)
                 {
                     _hotkeyRegistered = NativeMethods.RegisterHotKey(Handle, HotkeyId, mods, NativeMethods.VK_G);
+                    if (!_hotkeyRegistered) AppLogger.Warn("RegisterHotKey(Ctrl+Alt+Shift+G) failed (err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ").");
                 }
                 if (!_paletteHotkeyRegistered)
                 {
                     _paletteHotkeyRegistered = NativeMethods.RegisterHotKey(Handle, PaletteHotkeyId, mods, NativeMethods.VK_C);
+                    if (!_paletteHotkeyRegistered) AppLogger.Warn("RegisterHotKey(Ctrl+Alt+Shift+C) failed (err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ").");
                 }
                 if (!_cursorSizeHotkeyRegistered)
                 {
                     _cursorSizeHotkeyRegistered = NativeMethods.RegisterHotKey(Handle, CursorSizeHotkeyId, mods, NativeMethods.VK_S);
+                    if (!_cursorSizeHotkeyRegistered) AppLogger.Warn("RegisterHotKey(Ctrl+Alt+Shift+S) failed (err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ").");
                 }
                 if (!_presetHotkeyRegistered)
                 {
                     _presetHotkeyRegistered = NativeMethods.RegisterHotKey(Handle, PresetHotkeyId, mods, NativeMethods.VK_D);
+                    if (!_presetHotkeyRegistered) AppLogger.Warn("RegisterHotKey(Ctrl+Alt+Shift+D) failed (err=" + Marshal.GetLastWin32Error().ToString(CultureInfo.InvariantCulture) + ").");
                 }
             }
             else
@@ -4124,6 +4328,18 @@ namespace BibataIceTrail
         public void Dispose()
         {
             SetHotkeyEnabled(false);
+            try
+            {
+                NativeMethods.RAWINPUTDEVICE[] rid = new NativeMethods.RAWINPUTDEVICE[1];
+                rid[0].usUsagePage = 0x01;
+                rid[0].usUsage = 0x02;
+                rid[0].dwFlags = NativeMethods.RIDEV_REMOVE;
+                rid[0].hwndTarget = IntPtr.Zero;
+                NativeMethods.RegisterRawInputDevices(rid, 1, (uint)Marshal.SizeOf(typeof(NativeMethods.RAWINPUTDEVICE)));
+            }
+            catch
+            {
+            }
             if (Handle != IntPtr.Zero)
             {
                 DestroyHandle();
@@ -4143,8 +4359,10 @@ namespace BibataIceTrail
         private readonly OverlayEngine _engine;
         private readonly RawInputMessageWindow _inputSink;
         private readonly NotifyIcon _notifyIcon;
+        private readonly ContextMenuStrip _menu;
         private readonly Icon _activeIcon;
         private readonly Icon _pausedIcon;
+        private bool _disposed;
         private bool _colorDialogOpen;
         private long _lastCursorSwitchTicks;
 
@@ -4189,7 +4407,8 @@ namespace BibataIceTrail
                 _pausedIcon = CreateTrayIcon(false);
 
                 _notifyIcon = new NotifyIcon();
-                _notifyIcon.ContextMenuStrip = BuildMenu();
+                _menu = BuildMenu();
+                _notifyIcon.ContextMenuStrip = _menu;
                 _notifyIcon.MouseClick += OnTrayMouseClick;
                 SyncMenuAndIcon();
                 _notifyIcon.Visible = true;
@@ -4535,16 +4754,33 @@ namespace BibataIceTrail
 
         private void ExitApp()
         {
-            if (_notifyIcon != null)
-            {
-                _notifyIcon.Visible = false;
-                _notifyIcon.Dispose();
-            }
-            _inputSink.Dispose();
-            _engine.Dispose();
-            if (_activeIcon != null) _activeIcon.Dispose();
-            if (_pausedIcon != null) _pausedIcon.Dispose();
+            Dispose();
             ExitThread();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (!_disposed)
+            {
+                _disposed = true;
+                if (disposing)
+                {
+                    if (_notifyIcon != null)
+                    {
+                        _notifyIcon.Visible = false;
+                        _notifyIcon.Dispose();
+                    }
+                    if (_menu != null)
+                    {
+                        _menu.Dispose();
+                    }
+                    _inputSink.Dispose();
+                    _engine.Dispose();
+                    if (_activeIcon != null) _activeIcon.Dispose();
+                    if (_pausedIcon != null) _pausedIcon.Dispose();
+                }
+            }
+            base.Dispose(disposing);
         }
 
         private static Icon CreateTrayIcon(bool active)
@@ -4649,6 +4885,9 @@ namespace BibataIceTrail
             }
 
             bool forceShowTray = false;
+            bool runDiagnose = false;
+            string diagnoseOutPath = null;
+            string customLogPath = null;
             string instanceSuffix = "SingleInstance";
             if (args != null)
             {
@@ -4658,6 +4897,18 @@ namespace BibataIceTrail
                         string.Equals(args[i], "--tray", StringComparison.OrdinalIgnoreCase))
                     {
                         forceShowTray = true;
+                    }
+                    else if (string.Equals(args[i], "--diagnose", StringComparison.OrdinalIgnoreCase))
+                    {
+                        runDiagnose = true;
+                        if (i + 1 < args.Length && !args[i + 1].StartsWith("-", StringComparison.Ordinal))
+                        {
+                            diagnoseOutPath = args[++i];
+                        }
+                    }
+                    else if (string.Equals(args[i], "--log", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                    {
+                        customLogPath = args[++i];
                     }
                     else if (string.Equals(args[i], "--instance-name", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                     {
@@ -4679,27 +4930,131 @@ namespace BibataIceTrail
                 }
             }
 
+            string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
+            string cfgPath = Path.Combine(exeDir, "config.ini");
+            AppConfig config = new AppConfig(cfgPath);
+            config.Load();
+
+            if (runDiagnose)
+            {
+                return RunDiagnostics(config, cfgPath, diagnoseOutPath);
+            }
+
+            string defaultLogPath = !string.IsNullOrWhiteSpace(customLogPath)
+                ? customLogPath
+                : Path.Combine(exeDir, "BibataIceTrail.log");
+            AppLogger.Init(defaultLogPath);
+
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate (object sender, ThreadExceptionEventArgs e)
+            {
+                AppLogger.Error("Unhandled UI thread exception", e != null ? e.Exception : null);
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate (object sender, UnhandledExceptionEventArgs e)
+            {
+                AppLogger.Error("Unhandled domain exception (terminating=" + (e != null && e.IsTerminating) + ")", e != null ? e.ExceptionObject as Exception : null);
+            };
+            AppDomain.CurrentDomain.ProcessExit += delegate
+            {
+                AppLogger.Info("ProcessExit invoked.");
+            };
+
             bool createdNew;
             using (Mutex mutex = new Mutex(true, "Local\\BibataIceTrail_" + instanceSuffix, out createdNew))
             {
                 if (!createdNew)
                 {
+                    AppLogger.Info("Another BibataIceTrail instance is already running (mutex=" + instanceSuffix + "); exiting.");
                     return 0;
                 }
+
+                AppLogger.Info(BuildStartupSummary(config, cfgPath));
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
 
-                string exeDir = Path.GetDirectoryName(Application.ExecutablePath);
-                string cfgPath = Path.Combine(exeDir, "config.ini");
-                AppConfig config = new AppConfig(cfgPath);
-                config.Load();
-
-                TrayApplicationContext ctx = new TrayApplicationContext(config, config.ShowTrayIcon || forceShowTray);
-                Application.Run(ctx);
+                using (TrayApplicationContext ctx = new TrayApplicationContext(config, config.ShowTrayIcon || forceShowTray))
+                {
+                    Application.Run(ctx);
+                }
                 GC.KeepAlive(mutex);
+                AppLogger.Info("Clean exit.");
                 return 0;
             }
+        }
+
+        private static string BuildStartupSummary(AppConfig config, string cfgPath)
+        {
+            Process proc = Process.GetCurrentProcess();
+            StringBuilder sb = new StringBuilder();
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "Startup pid={0} session={1} arch={2} os={3} job=[{4}] configExists={5} palette={6} preset={7} showTray={8} screens={9}",
+                proc.Id,
+                proc.SessionId,
+                IntPtr.Size == 8 ? "x64" : "x86",
+                Environment.OSVersion.VersionString,
+                NativeMethods.GetCurrentJobSummary(),
+                File.Exists(cfgPath),
+                config.Palette,
+                config.Preset,
+                config.ShowTrayIcon,
+                Screen.AllScreens.Length);
+            return sb.ToString();
+        }
+
+        private static int RunDiagnostics(AppConfig config, string cfgPath, string outPath)
+        {
+            StringBuilder sb = new StringBuilder();
+            Process proc = Process.GetCurrentProcess();
+            sb.AppendLine("BibataIceTrail Diagnostics");
+            sb.AppendLine("Executable: " + Application.ExecutablePath);
+            sb.AppendLine("PID: " + proc.Id.ToString(CultureInfo.InvariantCulture) + " | SessionId: " + proc.SessionId.ToString(CultureInfo.InvariantCulture) + " | Arch: " + (IntPtr.Size == 8 ? "x64" : "x86"));
+            sb.AppendLine("OS: " + Environment.OSVersion.VersionString);
+            sb.AppendLine("Job: " + NativeMethods.GetCurrentJobSummary());
+            sb.AppendLine("ConfigPath: " + cfgPath + " (exists=" + File.Exists(cfgPath) + ")");
+            sb.AppendLine(string.Format(
+                CultureInfo.InvariantCulture,
+                "Config: Enabled={0} Trail={1} Ripple={2} Drag={3} Shake={4} Scroll={5} Hotkey={6} Preset={7} Palette={8} AutoPauseFullscreen={9} ShowTrayIcon={10}",
+                config.Enabled, config.TrailEnabled, config.ClickRippleEnabled, config.DragGlowEnabled,
+                config.ShakeLocateEnabled, config.ScrollGlowEnabled, config.HotkeyEnabled,
+                config.Preset, config.Palette, config.AutoPauseFullscreen, config.ShowTrayIcon));
+
+            Screen[] screens = Screen.AllScreens;
+            sb.AppendLine("Monitors (" + screens.Length.ToString(CultureInfo.InvariantCulture) + "):");
+            for (int i = 0; i < screens.Length; i++)
+            {
+                Rectangle b = screens[i].Bounds;
+                uint dpi = NativeMethods.GetDpiAtPoint(b.Left + b.Width / 2, b.Top + b.Height / 2);
+                sb.AppendLine(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "  [{0}] {1} Primary={2} Bounds=({3},{4},{5}x{6}) DPI={7} ({8}%)",
+                    i, screens[i].DeviceName, screens[i].Primary, b.Left, b.Top, b.Width, b.Height,
+                    dpi, (int)Math.Round(dpi * 100.0 / 96.0)));
+            }
+
+            try
+            {
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(@"Control Panel\Cursors", false))
+                {
+                    string defScheme = key != null ? (key.GetValue("") as string ?? "") : "";
+                    string arrow = key != null ? (key.GetValue("Arrow") as string ?? "") : "";
+                    sb.AppendLine("ActiveCursorScheme: " + defScheme);
+                    sb.AppendLine("ActiveArrow: " + arrow);
+                }
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("ActiveCursorError: " + ex.Message);
+            }
+
+            string text = sb.ToString();
+            try { Console.Out.Write(text); } catch { }
+            if (!string.IsNullOrWhiteSpace(outPath))
+            {
+                try { File.WriteAllText(outPath, text, Encoding.UTF8); } catch { }
+            }
+            return 0;
         }
 
         private static IntPtr SelfTestWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
@@ -4874,25 +5229,34 @@ namespace BibataIceTrail
                         NativeMethods.WS_POPUP,
                         0, 0, 1, 1,
                         IntPtr.Zero, IntPtr.Zero, hInst, IntPtr.Zero);
-                    if (testHwnd != IntPtr.Zero && ok)
+                    try
                     {
-                        NativeMethods.POINT ptDst = new NativeMethods.POINT();
-                        ptDst.X = bx;
-                        ptDst.Y = by;
-                        NativeMethods.SIZE sz = new NativeMethods.SIZE();
-                        sz.cx = bw;
-                        sz.cy = bh;
-                        NativeMethods.POINT ptSrc = new NativeMethods.POINT();
-                        ptSrc.X = 0;
-                        ptSrc.Y = 0;
-                        NativeMethods.BLENDFUNCTION blend = new NativeMethods.BLENDFUNCTION();
-                        blend.BlendOp = NativeMethods.AC_SRC_OVER;
-                        blend.BlendFlags = 0;
-                        blend.SourceConstantAlpha = 255;
-                        blend.AlphaFormat = NativeMethods.AC_SRC_ALPHA;
-                        ulwOk = NativeMethods.UpdateLayeredWindow(testHwnd, IntPtr.Zero, ref ptDst, ref sz, renderer.MemDC, ref ptSrc, 0, ref blend, NativeMethods.ULW_ALPHA);
-                        ulwErr = Marshal.GetLastWin32Error();
-                        NativeMethods.DestroyWindow(testHwnd);
+                        if (testHwnd != IntPtr.Zero && ok)
+                        {
+                            NativeMethods.POINT ptDst = new NativeMethods.POINT();
+                            ptDst.X = bx;
+                            ptDst.Y = by;
+                            NativeMethods.SIZE sz = new NativeMethods.SIZE();
+                            sz.cx = bw;
+                            sz.cy = bh;
+                            NativeMethods.POINT ptSrc = new NativeMethods.POINT();
+                            ptSrc.X = 0;
+                            ptSrc.Y = 0;
+                            NativeMethods.BLENDFUNCTION blend = new NativeMethods.BLENDFUNCTION();
+                            blend.BlendOp = NativeMethods.AC_SRC_OVER;
+                            blend.BlendFlags = 0;
+                            blend.SourceConstantAlpha = 255;
+                            blend.AlphaFormat = NativeMethods.AC_SRC_ALPHA;
+                            ulwOk = NativeMethods.UpdateLayeredWindow(testHwnd, IntPtr.Zero, ref ptDst, ref sz, renderer.MemDC, ref ptSrc, 0, ref blend, NativeMethods.ULW_ALPHA);
+                            ulwErr = Marshal.GetLastWin32Error();
+                        }
+                    }
+                    finally
+                    {
+                        if (testHwnd != IntPtr.Zero)
+                        {
+                            NativeMethods.DestroyWindow(testHwnd);
+                        }
                     }
                     GC.KeepAlive(testWndProc);
 
