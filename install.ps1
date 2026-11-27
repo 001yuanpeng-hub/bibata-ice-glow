@@ -21,6 +21,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "src\InstallState.ps1")
 
 function Normalize-BibataPath([string]$p) {
     if ([string]::IsNullOrWhiteSpace($p)) { return "" }
@@ -414,9 +415,8 @@ function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
     $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
     if (-not (Test-Path -LiteralPath $rtPath -PathType Leaf)) { return }
     try {
-        $rtItems = Get-Content -LiteralPath $rtPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (-not $rtItems) { return }
-        foreach ($item in @($rtItems)) {
+        $runtimeState = Read-BibataRuntimeSchemes $rtPath
+        foreach ($item in $runtimeState.Records) {
             if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) { continue }
             $sName = [string]$item.name
             if (-not $targetMap.Contains($sName)) {
@@ -581,15 +581,8 @@ if (-not [string]::IsNullOrWhiteSpace($TestSourceOverride)) {
 Write-Host "Install directory: $InstallDir" -ForegroundColor Cyan
 
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
-$prevManifest = $null
-if (Test-Path -LiteralPath $manifestPath) {
-    try {
-        $prevManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        $prevManifest = $null
-    }
-}
+$prevManifest = Read-BibataManifest $manifestPath
+$userConfigBackup = $prevManifest.userConfigBackup
 
 $managedCursor = $false
 $managedTrail = $false
@@ -610,6 +603,14 @@ if ($prevManifest) {
     if (-not [string]::IsNullOrWhiteSpace($prevManifest.trailExePath)) { $prevTrailExePath = [string]$prevManifest.trailExePath }
     if ($prevManifest.managedTrailFiles) {
         foreach ($tf in $prevManifest.managedTrailFiles) { Add-UniquePath $managedTrailFiles ([string]$tf) }
+    }
+    elseif ($prevManifest.managedTrail -and -not $prevManifest.PSObject.Properties['managedTrailFiles']) {
+        Add-UniquePath $managedTrailFiles $prevTrailExePath
+        Add-UniquePath $managedTrailFiles (Join-Path $InstallDir 'Bibata-Ice-Trail\BibataIceTrail.cs')
+    }
+    if ($prevManifest.schemaVersion -lt 3) {
+        # Earlier installers listed even pre-existing configs as their own.
+        Remove-PathFromList $managedTrailFiles (Join-Path $InstallDir 'Bibata-Ice-Trail\config.ini')
     }
     if ($prevManifest.managedThemeDirs) {
         foreach ($d in $prevManifest.managedThemeDirs) { Add-UniquePath $managedThemeDirs ([string]$d) }
@@ -858,6 +859,8 @@ try {
         $exeExistedBefore = Test-Path -LiteralPath $destExe
         $csExistedBefore = Test-Path -LiteralPath $destCs
         $cfgExistedBefore = Test-Path -LiteralPath $cfgPath
+        $ownsConfig = -not $cfgExistedBefore -or $managedTrailFiles -contains $cfgPath
+        if ($ownsConfig) { $userConfigBackup = $null }
         $runSnapBefore = Snapshot-RegValue $runKey "BibataIceTrail"
         $runningProcs = @(Get-BibataProcessesByExe $destExe)
         $wasRunning = ($runningProcs.Count -gt 0)
@@ -1148,6 +1151,13 @@ try {
             Copy-Item -LiteralPath $stagedExe -Destination $destExe -Force
 
             if (-not [string]::IsNullOrWhiteSpace($Palette)) {
+                if (-not $ownsConfig -and
+                    (-not $userConfigBackup -or (Get-FileSha256 $cfgBak) -ne $userConfigBackup.writtenHash)) {
+                    $userConfigBackup = [ordered]@{
+                        originalBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgBak))
+                        writtenHash   = $null
+                    }
+                }
                 $paletteMap = @{
                     Ice      = "0"
                     Cyan     = "1"
@@ -1178,6 +1188,7 @@ try {
                 else {
                     Set-Content -LiteralPath $cfgPath -Value @("[BibataIceTrail]", "Palette=$pVal") -Encoding UTF8
                 }
+                if ($userConfigBackup) { $userConfigBackup.writtenHash = Get-FileSha256 $cfgPath }
                 Write-Host "Configured palette: $Palette (Palette=$pVal)" -ForegroundColor Green
             }
 
@@ -1201,15 +1212,16 @@ try {
             Add-UniquePath $managedTrailFiles $destExe
             Add-UniquePath $managedTrailFiles $destCs
             # The running app can create config.ini after a -NoLaunch install.
-            Add-UniquePath $managedTrailFiles $cfgPath
+            if ($ownsConfig) { Add-UniquePath $managedTrailFiles $cfgPath }
         }
 
         $manifestObj = [ordered]@{
-            schemaVersion        = 2
+            schemaVersion        = 3
             installDir           = $InstallDir
             managedTrail         = $managedTrail
             trailExePath         = $prevTrailExePath
             managedTrailFiles    = @($managedTrailFiles)
+            userConfigBackup     = $userConfigBackup
             autoStartManaged     = $autoStartManaged
             managedCursor        = $managedCursor
             managedThemeDirs     = @($managedThemeDirs)
@@ -1220,30 +1232,21 @@ try {
             previousCursorState  = $previousCursorState
             updatedAt            = (Get-Date).ToString("o")
         }
-        $manifestJson = $manifestObj | ConvertTo-Json -Depth 6
-        Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
+        Write-BibataJson $manifestPath $manifestObj
 
-        if ($prunedSchemeNames.Count -gt 0) {
+        if (-not $SkipCursor) {
             $rtFile = Join-Path $InstallDir "bibata-runtime-schemes.json"
             if (Test-Path -LiteralPath $rtFile -PathType Leaf) {
                 try {
-                    $rtArr = @(Get-Content -LiteralPath $rtFile -Raw -Encoding UTF8 | ConvertFrom-Json)
-                    $keptRt = @($rtArr | Where-Object {
-                        $n = [string]$_.name
-                        $drop = $false
-                        foreach ($pn in $prunedSchemeNames) {
-                            if ([string]::Equals($n, $pn, [StringComparison]::OrdinalIgnoreCase)) { $drop = $true; break }
-                        }
-                        -not $drop
-                    })
-                    if ($keptRt.Count -eq 0) {
-                        Remove-Item -LiteralPath $rtFile -Force -ErrorAction SilentlyContinue
-                    }
-                    else {
-                        Set-Content -LiteralPath $rtFile -Value (ConvertTo-Json -InputObject $keptRt -Depth 4) -Encoding UTF8
+                    $runtime = Read-BibataRuntimeSchemes $rtFile
+                    if ($runtime.NeedsRepair -or $prunedSchemeNames.Count -gt 0) {
+                        $kept = @($runtime.Records | Where-Object { $prunedSchemeNames -notcontains $_.name })
+                        if ($kept.Count -eq 0) { Remove-Item -LiteralPath $rtFile -Force }
+                        else { Write-BibataJson $rtFile $kept }
                     }
                 }
                 catch {
+                    Write-Warning "Could not update cursor scheme backup '$rtFile': $($_.Exception.Message)"
                 }
             }
         }

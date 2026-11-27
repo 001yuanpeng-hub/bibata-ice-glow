@@ -1319,6 +1319,117 @@ class FailLaunch {
     Assert-True ($retry23.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $manifest23)) "Case 23: Retry failed to remove released manifest"
     Write-Host "PASS Case 23: Locked manifest returns failure and retry removes it" -ForegroundColor Green
 
+    # Case 24: a config present before the first trail installation belongs to the user.
+    foreach ($scenario in 'untouched', 'palette', 'edited', 'edited-before-upgrade', 'legacy-uninstall', 'legacy-upgrade') {
+        $d24 = Join-Path $testRoot "case24_$scenario"
+        $r24 = Join-Path $regRoot "case24_$scenario"
+        $trail24 = New-Item -ItemType Directory -Path (Join-Path $d24 'Bibata-Ice-Trail') -Force
+        $cfg24 = Join-Path $trail24.FullName 'config.ini'
+        [IO.File]::WriteAllText($cfg24, "[BibataIceTrail]$([char]10)Palette=1$([char]10)ShowTrayIcon=true")
+        $expectedHash = Get-FileSha256 $cfg24
+        $opts24 = @{ InstallDir=$d24; RegistryRoot=$r24; SkipCursor=$true; NoLaunch=$true; NoAutoStart=$true; SkipTaskScheduler=$true; SkipCursorRefresh=$true }
+        & $installPs1 @opts24 | Out-Null
+        Assert-True ((Get-FileSha256 $cfg24) -eq $expectedHash) "Case 24: Install modified the supplied configuration"
+        if ($scenario -like 'legacy-*') {
+            $manifest24 = Join-Path $d24 'bibata-ice-glow-manifest.json'
+            $legacy24 = Get-Content $manifest24 -Raw | ConvertFrom-Json
+            $legacy24.schemaVersion = 2
+            $legacy24.PSObject.Properties.Remove('userConfigBackup')
+            $legacy24.managedTrailFiles += $cfg24
+            Set-Content -LiteralPath $manifest24 -Value ($legacy24 | ConvertTo-Json -Depth 6) -Encoding UTF8
+        }
+        if ($scenario -notin 'untouched', 'legacy-uninstall') {
+            & $installPs1 @opts24 -Palette Rainbow | Out-Null
+            Assert-True ((Get-Content -LiteralPath $cfg24 -Raw) -match 'Palette=5') "Case 24: Requested palette was not applied"
+            if ($scenario -like 'edited*') {
+                [IO.File]::WriteAllText($cfg24, "[BibataIceTrail]$([char]10)Palette=4$([char]10)CustomColor=#123456")
+                $expectedHash = Get-FileSha256 $cfg24
+            }
+            if ($scenario -ne 'edited') { & $installPs1 @opts24 -Palette Frost | Out-Null }
+        }
+        & $uninstallPs1 -InstallDir $d24 -RegistryRoot $r24 -SkipCursorRefresh | Out-Null
+        Assert-True ((Get-FileSha256 $cfg24) -eq $expectedHash) "Case 24 ($scenario): User config lost or changed"
+        Assert-True (-not (Test-Path (Join-Path $trail24.FullName 'BibataIceTrail.exe'))) "Case 24: Managed EXE left behind"
+    }
+    Write-Host "PASS Case 24: Existing config and later user edits survive install, palette upgrades and uninstall"
+
+    # Case 25: an existing malformed/empty manifest must stop both entry points before mutation.
+    $d25 = Join-Path $testRoot 'case25_bad_manifest'
+    $r25 = Join-Path $regRoot 'case25'
+    $opts25 = @{ InstallDir=$d25; RegistryRoot=$r25; NoLaunch=$true; SkipCursorRefresh=$true; SkipTaskScheduler=$true; TestCursorZipPath=$fixtureZip }
+    & $installPs1 @opts25 -SingleSize | Out-Null
+    $manifest25 = Join-Path $d25 'bibata-ice-glow-manifest.json'
+    $original25 = [IO.File]::ReadAllBytes($manifest25)
+    $exe25 = Join-Path $d25 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $exeHash25 = Get-FileSha256 $exe25
+    $cur25 = Join-Path $r25 'Control Panel\Cursors'
+    $arrow25 = (Get-Item $cur25).GetValue('Arrow')
+    $run25 = Join-Path $r25 'Software\Microsoft\Windows\CurrentVersion\Run'
+    $startup25 = (Get-Item $run25).GetValue('BibataIceTrail')
+    foreach ($bad in '{"schemaVersion":', '', '{}', 'null', '[]') {
+        [IO.File]::WriteAllText($manifest25, $bad)
+        foreach ($operation in 'install', 'uninstall') {
+            $message = ''
+            try {
+                if ($operation -eq 'install') { & $installPs1 @opts25 -Size Large | Out-Null }
+                else { & $uninstallPs1 -InstallDir $d25 -RegistryRoot $r25 -SkipCursorRefresh | Out-Null }
+            }
+            catch { $message = $_.Exception.Message }
+            Assert-True ($message.Contains($manifest25)) "Case 25: $operation did not identify the invalid manifest"
+            Assert-True ([IO.File]::ReadAllText($manifest25) -ceq $bad) "Case 25: $operation overwrote the bad manifest"
+            Assert-True ((Get-FileSha256 $exe25) -eq $exeHash25 -and (Test-Path -LiteralPath $arrow25)) "Case 25: Managed files changed"
+            Assert-True ((Get-Item $cur25).GetValue('Arrow') -eq $arrow25 -and (Get-Item $run25).GetValue('BibataIceTrail') -eq $startup25) "Case 25: Registry changed"
+        }
+    }
+    [IO.File]::WriteAllBytes($manifest25, $original25)
+    & $uninstallPs1 -InstallDir $d25 -RegistryRoot $r25 -SkipCursorRefresh | Out-Null
+    Assert-True (-not (Test-Path $manifest25)) "Case 25: Valid manifest could not be used for retry"
+    Write-Host "PASS Case 25: Invalid manifest stops install and uninstall; restoring the original allows cleanup"
+
+    # Case 26: exercise the actual .NET reader/writer before and after PowerShell prunes its records.
+    $d26 = Join-Path $testRoot 'case26_cycle_resize'
+    $r26 = Join-Path $regRoot 'case26'
+    $c26 = Join-Path $r26 'Control Panel\Cursors'
+    $s26 = Join-Path $c26 'Schemes'
+    [void](New-Item -Path $s26 -Force)
+    $large26 = 'Bibata-Modern-Ice (Large)'
+    $xl26 = 'Bibata-Modern-Ice (Extra-Large)'
+    $user26 = Join-Path $testRoot 'user26.cur'
+    [IO.File]::WriteAllText($user26, 'user cursor')
+    Set-ItemProperty -Path $s26 -Name $xl26 -Value $user26 -Type ExpandString
+    $opts26 = @{ InstallDir=$d26; RegistryRoot=$r26; NoLaunch=$true; NoAutoStart=$true; SkipCursorRefresh=$true; SkipTaskScheduler=$true; TestCursorZipPath=$fixtureZip }
+    & $installPs1 @opts26 | Out-Null
+    $exe26 = Join-Path $d26 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $cycleArgs26 = @('--cycle-cursor-size', '--cursors-reg-key', ('"{0}"' -f $c26.Substring(6)), '--no-refresh')
+    $side26 = Join-Path $d26 'bibata-runtime-schemes.json'
+    foreach ($phase in 'initial', 'expanded') {
+        foreach ($name in $large26, $xl26) {
+            $process26 = Start-Process $exe26 -ArgumentList $cycleArgs26 -WindowStyle Hidden -Wait -PassThru
+            Assert-True ($process26.ExitCode -eq 0 -and (Get-Item $c26).GetValue('') -eq $name) "Case 26: $phase failed to switch to $name"
+            $saved26 = (Get-Item $s26).GetValue($name)
+            Assert-True (($saved26 -split ',')[0] -eq (Get-Item $c26).GetValue('Arrow')) "Case 26: $phase saved and active $name disagree"
+        }
+        if ($phase -eq 'initial') {
+            $records26 = Get-Content -LiteralPath $side26 -Raw | ConvertFrom-Json
+            $wrapped26 = @([ordered]@{ value=$records26; Count=2 })
+            [IO.File]::WriteAllText($side26, (ConvertTo-Json -InputObject $wrapped26 -Depth 6))
+            & $installPs1 @opts26 | Out-Null
+            $flat26 = Get-Content -LiteralPath $side26 -Raw | ConvertFrom-Json
+            Assert-True ($flat26.Count -eq 2 -and $flat26[0].name -eq $large26) "Case 26: Existing PowerShell-wrapped records were not repaired"
+            & $installPs1 @opts26 -SingleSize | Out-Null
+            Assert-True (-not (Test-Path $side26)) "Case 26: Empty backup left after both sizes were pruned"
+            Assert-True ((Get-Item $s26).GetValue($xl26) -eq $user26) "Case 26: User's original Extra-Large backup lost"
+            & $installPs1 @opts26 | Out-Null
+        }
+    }
+    & $installPs1 @opts26 -SingleSize -Size Large | Out-Null
+    $json26 = Get-Content -LiteralPath $side26 -Raw
+    $last26 = $json26 | ConvertFrom-Json
+    Assert-True ($json26.TrimStart().StartsWith('[') -and @($last26).Count -eq 1 -and $last26[0].name -eq $large26) "Case 26: One remaining record must be a flat JSON array"
+    & $uninstallPs1 -InstallDir $d26 -RegistryRoot $r26 -SkipCursorRefresh | Out-Null
+    Assert-True ((Get-Item $s26).GetValue($xl26) -eq $user26 -and (Get-Item $s26).GetValueKind($xl26) -eq 'ExpandString') "Case 26: User's saved scheme or type lost on uninstall"
+    Write-Host "PASS Case 26: Size cycling registers the correct scheme after repair, prune and expansion"
+
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched
     # =========================================================================

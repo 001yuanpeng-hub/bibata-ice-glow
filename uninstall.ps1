@@ -7,6 +7,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "src\InstallState.ps1")
 
 function Normalize-BibataPath([string]$p) {
     if ([string]::IsNullOrWhiteSpace($p)) { return "" }
@@ -332,17 +333,7 @@ if ([string]::IsNullOrWhiteSpace($InstallDir)) {
 $InstallDir = Resolve-BibataAbsolutePath $InstallDir
 
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
-$manifest = $null
-if (Test-Path -LiteralPath $manifestPath) {
-    # An unreadable manifest may still own active files and registry values.
-    $manifestJson = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 -ErrorAction Stop
-    try {
-        $manifest = $manifestJson | ConvertFrom-Json
-    }
-    catch {
-        $manifest = $null
-    }
-}
+$manifest = Read-BibataManifest $manifestPath
 
 $trailDir = Join-Path $InstallDir "Bibata-Ice-Trail"
 $trailExe = if ($manifest -and -not [string]::IsNullOrWhiteSpace($manifest.trailExePath)) {
@@ -357,6 +348,15 @@ $shouldManageTrail = (-not $manifest) -or ([bool]$manifest.managedTrail)
 if ($shouldManageTrail) {
     Stop-BibataProcessesByExe $trailExe
     Start-Sleep -Milliseconds 300
+
+    $configPath = Join-Path $trailDir "config.ini"
+    $backup = $manifest.userConfigBackup
+    if (-not $KeepFiles -and $backup -and (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        # A different hash means the user or application has since saved newer settings.
+        if ((Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -eq $backup.writtenHash) {
+            Write-BibataFileAtomically $configPath ([Convert]::FromBase64String($backup.originalBytes))
+        }
+    }
 
     $runKey = Join-Path $RegistryRoot "Software\Microsoft\Windows\CurrentVersion\Run"
     if (Test-Path $runKey) {
@@ -495,8 +495,8 @@ if ($manifest) {
         $rtSchemesPath = Join-Path $InstallDir "bibata-runtime-schemes.json"
         if (Test-Path -LiteralPath $rtSchemesPath -PathType Leaf) {
             try {
-                $rtList = Get-Content -LiteralPath $rtSchemesPath -Raw -Encoding UTF8 | ConvertFrom-Json
-                foreach ($rtItem in @($rtList)) {
+                $runtime = Read-BibataRuntimeSchemes $rtSchemesPath
+                foreach ($rtItem in $runtime.Records) {
                     if (-not $rtItem -or [string]::IsNullOrWhiteSpace([string]$rtItem.name)) { continue }
                     $rtName = [string]$rtItem.name
                     $existingKey = $null
@@ -784,17 +784,16 @@ if (-not $KeepFiles) {
             $trailTargetFiles = @($manifest.managedTrailFiles)
         }
         else {
-            # Older installations have no file list. Only the installed program,
-            # source and live configuration have unambiguous names.
+            # Without ownership information the live config may predate installation.
             $trailTargetFiles = @(
                 $trailExe
                 (Join-Path $trailDir "BibataIceTrail.cs")
-                (Join-Path $trailDir "config.ini")
             )
         }
 
         foreach ($tfPath in $trailTargetFiles) {
             if (-not (Test-PathUnderAny $tfPath @($trailDir))) { continue }
+            if ($manifest.schemaVersion -lt 3 -and (Normalize-BibataPath $tfPath) -eq (Normalize-BibataPath $configPath)) { continue }
             if (Test-Path -LiteralPath $tfPath -PathType Leaf) {
                 if (-not (Try-RemoveFileStrict $tfPath $failedDeletions)) {
                     $remainingManagedTrailFiles.Add($tfPath)
@@ -838,7 +837,7 @@ if (-not $KeepFiles) {
             }
             else {
                 $retryManifest = [ordered]@{
-                    schemaVersion        = 2
+                    schemaVersion        = 3
                     installDir           = $InstallDir
                     managedTrail         = $trailHasRemaining
                     trailExePath         = $trailExe
@@ -854,7 +853,7 @@ if (-not $KeepFiles) {
                     updatedAt            = (Get-Date).ToString("o")
                 }
             }
-            Set-Content -LiteralPath $manifestPath -Value ($retryManifest | ConvertTo-Json -Depth 6) -Encoding UTF8
+            Write-BibataJson $manifestPath $retryManifest
         }
 
         $failedListMsg = New-Object System.Collections.Generic.List[string]
