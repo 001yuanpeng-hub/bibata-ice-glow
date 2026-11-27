@@ -1493,6 +1493,64 @@ class FailLaunch {
     Assert-True ((Get-Item $s27).GetValue($large27) -eq $user27 -and (Get-Item $s27).GetValueKind($large27) -eq 'ExpandString') "Case 27: Original same-name scheme lost"
     Write-Host "PASS Case 27: Invalid or unreadable sidecar stops changes; a deletion lock reports failure and retry preserves the original scheme"
 
+    # Case 28: pruning can remove the whole runtime file or rewrite it with one surviving record.
+    foreach ($keepSize in 'Regular', 'Extra-Large') {
+        $d28 = Join-Path $testRoot "case28_$keepSize"
+        $r28 = Join-Path $regRoot "case28_$keepSize"
+        $c28 = Join-Path $r28 'Control Panel\Cursors'
+        $s28 = Join-Path $c28 'Schemes'
+        [void](New-Item -Path $s28 -Force)
+        $large28 = 'Bibata-Modern-Ice (Large)'
+        $original28 = Join-Path $testRoot 'original28.cur'
+        $latest28 = Join-Path $testRoot 'latest28.cur'
+        foreach ($file in $original28, $latest28) { [IO.File]::WriteAllText($file, 'user cursor') }
+        Set-ItemProperty $s28 $large28 $original28 -Type ExpandString
+        $opts28 = @{InstallDir=$d28; RegistryRoot=$r28; NoLaunch=$true; NoAutoStart=$true; SkipTaskScheduler=$true; SkipCursorRefresh=$true; TestCursorZipPath=$fixtureZip}
+        & $installPs1 @opts28 | Out-Null
+        $exe28 = Join-Path $d28 'Bibata-Ice-Trail\BibataIceTrail.exe'
+        $cycleArgs28 = @('--cycle-cursor-size','--cursors-reg-key',('"{0}"' -f $c28.Substring(6)),'--no-refresh')
+        $sizes28 = @('Large')
+        if ($keepSize -eq 'Extra-Large') { $sizes28 += 'Extra-Large' }
+        foreach ($size28 in $sizes28) {
+            $cycle28 = Start-Process $exe28 -ArgumentList $cycleArgs28 -WindowStyle Hidden -Wait -PassThru
+            Assert-True ($cycle28.ExitCode -eq 0 -and (Get-Item $c28).GetValue('') -eq "Bibata-Modern-Ice ($size28)") "Case 28: Hotkey setup failed"
+        }
+        $side28 = Join-Path $d28 'bibata-runtime-schemes.json'
+        $manifest28 = Join-Path $d28 'bibata-ice-glow-manifest.json'
+        $sideBytes28 = [IO.File]::ReadAllBytes($side28)
+        $largeValue28 = (Get-Item $s28).GetValue($large28)
+        $arrow28 = (Get-Item $c28).GetValue('Arrow')
+        $files28 = @($side28, $manifest28, $arrow28, ($largeValue28 -split ',')[0])
+        $hashes28 = @($files28 | ForEach-Object { Get-FileSha256 $_ }) -join ','
+        foreach ($target28 in $side28, $manifest28) {
+            $lock28 = [IO.File]::Open($target28, 'Open', 'Read', 'Read')
+            try {
+                $error28 = ''
+                try { & $installPs1 @opts28 -Size $keepSize -SingleSize -SkipTrail | Out-Null }
+                catch { $error28 = $_.Exception.Message }
+            }
+            finally { $lock28.Dispose() }
+            Assert-True ($error28.Length -gt 0) "Case 28 ($keepSize): Locked $target28 reported success"
+            if ($target28 -eq $side28) { Assert-True ($error28.Contains($side28)) "Case 28: Missing runtime backup path" }
+            Assert-True ((@($files28 | ForEach-Object { Get-FileSha256 $_ }) -join ',') -eq $hashes28) "Case 28: Rollback did not restore files"
+            Assert-True ((Get-Item $c28).GetValue('Arrow') -eq $arrow28 -and (Get-Item $s28).GetValue($large28) -eq $largeValue28) "Case 28: Cursor registry changed"
+        }
+        & $installPs1 @opts28 -Size $keepSize -SingleSize -SkipTrail | Out-Null
+        Assert-True ((Get-Item $s28).GetValue($large28) -eq $original28) "Case 28: Unlocked retry lost the original Large scheme"
+        # Reproduce the stale file left behind by an older installer after a successful-looking prune.
+        [IO.File]::WriteAllBytes($side28, $sideBytes28)
+        Set-ItemProperty $s28 $large28 $latest28 -Type String
+        if ($keepSize -eq 'Regular') {
+            & $installPs1 @opts28 -Size Regular -SingleSize -SkipTrail | Out-Null
+            Assert-True (-not (Test-Path $side28)) "Case 28: Retry retained the obsolete Large backup"
+        }
+        & $installPs1 @opts28 -Size Large -SkipTrail | Out-Null
+        & $uninstallPs1 -InstallDir $d28 -RegistryRoot $r28 -SkipCursorRefresh | Out-Null
+        Assert-True ((Get-Item $s28).GetValue($large28) -eq $latest28 -and (Get-Item $s28).GetValueKind($large28) -eq 'String') "Case 28: Uninstall rolled back a newer user edit"
+        Assert-True (-not (Test-Path $d28)) "Case 28: Installation or transaction backup left behind"
+    }
+    Write-Host "PASS Case 28: Prune locks roll back both state files; retry and stale-backup recovery preserve the latest Large scheme"
+
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched
     # =========================================================================

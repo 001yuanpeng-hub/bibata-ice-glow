@@ -823,7 +823,7 @@ try {
     $overwrittenCursorBackups = New-Object System.Collections.Generic.List[object]
     $backedUpCursorNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     $prunedSchemeRollbacks = New-Object System.Collections.Generic.List[object]
-    $prunedSchemeNames = New-Object System.Collections.Generic.List[string]
+    $retiredRuntimeSchemes = New-Object System.Collections.Generic.List[string]
     $cursorRegistryApplied = $false
 
     if (-not $SkipCursor) {
@@ -993,6 +993,8 @@ try {
                 foreach ($extraSz in $extraSizes) {
                     $extraSizeDir = Join-Path $themeRoot "$themeName-$extraSz-Windows"
                     $extraSchemeName = "$themeName ($extraSz)"
+                    # Retire stale backups even if a previous prune already restored the registry.
+                    $retiredRuntimeSchemes.Add($extraSchemeName)
                     if (Test-Path $schemesKey) {
                         $extraSchemeSnap = Snapshot-RegValue $schemesKey $extraSchemeName
                         if ($extraSchemeSnap.valExisted) {
@@ -1005,27 +1007,20 @@ try {
                                         Set-ItemProperty -Path $schemesKey -Name $extraSchemeName -Value ([string]$extraRec.previousValue) -Type $ek
                                     }
                                     else {
-                                        Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction SilentlyContinue
+                                        Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction Stop
                                     }
-                                    $managedSchemeRecords.Remove($extraSchemeName)
-                                    for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
-                                        if ([string]::Equals([string]$managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
-                                            $managedSchemes.RemoveAt($si)
-                                        }
-                                    }
-                                    $prunedSchemeNames.Add($extraSchemeName)
                                 }
                             }
                             elseif (Test-AllSchemePathsUnderDir ([string]$extraSchemeSnap.value) $extraSizeDir) {
                                 $prunedSchemeRollbacks.Add([pscustomobject]@{ Name = $extraSchemeName; Snapshot = $extraSchemeSnap })
-                                Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction SilentlyContinue
-                                for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
-                                    if ([string]::Equals([string]$managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
-                                        $managedSchemes.RemoveAt($si)
-                                    }
-                                }
-                                $prunedSchemeNames.Add($extraSchemeName)
+                                Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction Stop
                             }
+                        }
+                    }
+                    $managedSchemeRecords.Remove($extraSchemeName)
+                    for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
+                        if ([string]::Equals($managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
+                            $managedSchemes.RemoveAt($si)
                         }
                     }
                 }
@@ -1120,6 +1115,8 @@ try {
                 $stillMatchesOurs = $schemeSnapBefore.valExisted -and
                     [string]::Equals([string]$schemeSnapBefore.value, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
                 if (-not $stillMatchesOurs) {
+                    # The new manifest will own the latest user edit for this scheme.
+                    $retiredRuntimeSchemes.Add($schemeName)
                     $inheritedSchemeSnap = Resolve-InheritedSchemeSnapshot $schemeName $schemeSnapBefore $InstallDir
                     $existingRec.existedBefore = [bool]$inheritedSchemeSnap.valExisted
                     $existingRec.previousValue = $inheritedSchemeSnap.value
@@ -1233,24 +1230,41 @@ try {
             previousCursorState  = $previousCursorState
             updatedAt            = (Get-Date).ToString("o")
         }
-        Write-BibataJson $manifestPath $manifestObj
-
+        $runtimeBackup = $null
         if (-not $SkipCursor) {
             $rtFile = Join-Path $InstallDir "bibata-runtime-schemes.json"
-            if (Test-Path -LiteralPath $rtFile -PathType Leaf) {
-                try {
-                    $runtime = Read-BibataRuntimeSchemes $rtFile
-                    if ($runtime.NeedsRepair -or $prunedSchemeNames.Count -gt 0) {
-                        $kept = @($runtime.Records | Where-Object { $prunedSchemeNames -notcontains $_.name })
-                        if ($kept.Count -eq 0) { Remove-Item -LiteralPath $rtFile -Force }
-                        else { Write-BibataJson $rtFile $kept }
+            $runtime = Read-BibataRuntimeSchemes $rtFile
+            if ($runtime) {
+                $kept = @($runtime.Records | Where-Object { $retiredRuntimeSchemes -notcontains $_.name })
+                if ($runtime.NeedsRepair -or $kept.Count -ne $runtime.Records.Count) {
+                    $runtimeBackup = Join-Path $InstallDir ([Guid]::NewGuid().ToString('N') + '.runtime-schemes.bak')
+                    try {
+                        if ($kept.Count -eq 0) { [IO.File]::Move($rtFile, $runtimeBackup) }
+                        else { Write-BibataJson $rtFile $kept $runtimeBackup }
                     }
-                }
-                catch {
-                    Write-Warning "Could not update cursor scheme backup '$rtFile': $($_.Exception.Message)"
+                    catch {
+                        throw "Cannot update cursor scheme backup '$rtFile': $($_.Exception.Message)"
+                    }
                 }
             }
         }
+        try {
+            Write-BibataJson $manifestPath $manifestObj
+        }
+        catch {
+            # The manifest was not committed. Restore the exact runtime backup before rolling back the install.
+            if ($runtimeBackup) {
+                try {
+                    if ([IO.File]::Exists($rtFile)) { [IO.File]::Replace($runtimeBackup, $rtFile, [System.Management.Automation.Language.NullString]::Value) }
+                    else { [IO.File]::Move($runtimeBackup, $rtFile) }
+                }
+                catch {
+                    Write-Warning "Could not restore '$rtFile'. Original backup retained at '$runtimeBackup': $($_.Exception.Message)"
+                }
+            }
+            throw
+        }
+        if ($runtimeBackup) { Remove-Item -LiteralPath $runtimeBackup -Force -ErrorAction Continue }
 
         if (-not $SkipTrail) {
             if (Test-Path -LiteralPath $exeBak) { Remove-Item -LiteralPath $exeBak -Force -ErrorAction SilentlyContinue }
@@ -1322,9 +1336,6 @@ try {
                     foreach ($pr in $prunedSchemeRollbacks) {
                         Restore-RegValue $schemesKey $pr.Name $pr.Snapshot
                     }
-                    if (-not $SkipCursorRefresh) {
-                        Refresh-WindowsCursors
-                    }
                 }
                 catch {
                     Write-Warning "Failed to rollback cursor registry state: $($_.Exception.Message)"
@@ -1358,6 +1369,8 @@ try {
                     Write-Warning "Could not restore cursor file $($bk.Target): $($_.Exception.Message); keeping backup at $($bk.Backup)"
                 }
             }
+
+            if ($cursorRegistryApplied -and -not $SkipCursorRefresh) { Refresh-WindowsCursors }
 
             $dirsDesc = @($createdCursorDirsThisRun | Sort-Object { $_.Length } -Descending)
             foreach ($cd in $dirsDesc) {

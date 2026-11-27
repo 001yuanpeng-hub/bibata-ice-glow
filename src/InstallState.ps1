@@ -14,12 +14,12 @@ function Read-BibataManifest([string]$path) {
     }
 }
 
-function Write-BibataFileAtomically([string]$path, [byte[]]$bytes) {
+function Write-BibataFileAtomically([string]$path, [byte[]]$bytes, $backupPath = [System.Management.Automation.Language.NullString]::Value) {
     $temp = Join-Path ([IO.Path]::GetDirectoryName($path)) ([guid]::NewGuid().ToString('N') + '.tmp')
     try {
         [IO.File]::WriteAllBytes($temp, $bytes)
         if ([IO.File]::Exists($path)) {
-            [IO.File]::Replace($temp, $path, [System.Management.Automation.Language.NullString]::Value)
+            [IO.File]::Replace($temp, $path, $backupPath)
         }
         else {
             [IO.File]::Move($temp, $path)
@@ -30,9 +30,9 @@ function Write-BibataFileAtomically([string]$path, [byte[]]$bytes) {
     }
 }
 
-function Write-BibataJson([string]$path, $value) {
+function Write-BibataJson([string]$path, $value, $backupPath = [System.Management.Automation.Language.NullString]::Value) {
     $json = ConvertTo-Json -InputObject $value -Depth 6
-    Write-BibataFileAtomically $path ([Text.Encoding]::UTF8.GetBytes($json))
+    Write-BibataFileAtomically $path ([Text.Encoding]::UTF8.GetBytes($json)) $backupPath
 }
 
 function Read-BibataRuntimeSchemes([string]$path) {
