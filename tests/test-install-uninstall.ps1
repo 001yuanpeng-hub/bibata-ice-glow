@@ -107,7 +107,7 @@ if ($realRunKey) {
 $lockProc = $null
 try {
     # PowerShell syntax validation
-    foreach ($psFile in @($installPs1, $uninstallPs1)) {
+    foreach ($psFile in @($installPs1, $uninstallPs1, (Join-Path $repoRoot 'src\InstallState.ps1'))) {
         $tokens = $null
         $errors = $null
         [System.Management.Automation.Language.Parser]::ParseFile($psFile, [ref]$tokens, [ref]$errors) | Out-Null
@@ -1429,6 +1429,69 @@ class FailLaunch {
     & $uninstallPs1 -InstallDir $d26 -RegistryRoot $r26 -SkipCursorRefresh | Out-Null
     Assert-True ((Get-Item $s26).GetValue($xl26) -eq $user26 -and (Get-Item $s26).GetValueKind($xl26) -eq 'ExpandString') "Case 26: User's saved scheme or type lost on uninstall"
     Write-Host "PASS Case 26: Size cycling registers the correct scheme after repair, prune and expansion"
+
+    # Case 27: only the runtime backup knows the user's original Large scheme.
+    $d27 = Join-Path $testRoot 'case27_sidecar'
+    $r27 = Join-Path $regRoot 'case27'
+    $c27 = Join-Path $r27 'Control Panel\Cursors'
+    $s27 = Join-Path $c27 'Schemes'
+    [void](New-Item -Path $s27 -Force)
+    $large27 = 'Bibata-Modern-Ice (Large)'
+    $user27 = Join-Path $testRoot 'case27-user.cur'
+    [IO.File]::WriteAllText($user27, 'original cursor')
+    Set-ItemProperty -Path $s27 -Name $large27 -Value $user27 -Type ExpandString
+    $opts27 = @{ InstallDir=$d27; RegistryRoot=$r27; NoLaunch=$true; SkipCursorRefresh=$true; SkipTaskScheduler=$true; TestCursorZipPath=$fixtureZip }
+    & $installPs1 @opts27 | Out-Null
+    $exe27 = Join-Path $d27 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $cycle27 = Start-Process $exe27 -ArgumentList @('--cycle-cursor-size','--cursors-reg-key',('"{0}"' -f $c27.Substring(6)),'--no-refresh') -WindowStyle Hidden -Wait -PassThru
+    $side27 = Join-Path $d27 'bibata-runtime-schemes.json'
+    $manifest27 = Join-Path $d27 'bibata-ice-glow-manifest.json'
+    $record27 = Get-Content -LiteralPath $side27 -Raw | ConvertFrom-Json
+    Assert-True ($cycle27.ExitCode -eq 0 -and $record27.name -eq $large27 -and $record27.previousValue -eq $user27) "Case 27: Hotkey did not back up the original scheme"
+    $valid27 = [IO.File]::ReadAllBytes($side27)
+    $saved27 = (Get-Item $s27).GetValue($large27)
+    $arrow27 = (Get-Item $c27).GetValue('Arrow')
+    $run27 = Join-Path $r27 'Software\Microsoft\Windows\CurrentVersion\Run'
+    $startup27 = (Get-Item $run27).GetValue('BibataIceTrail')
+    $files27 = @($manifest27, $exe27, $arrow27, $user27)
+    $hashes27 = @($files27 | ForEach-Object { Get-FileSha256 $_ }) -join ','
+    foreach ($problem in 'truncated', 'missing-original', 'exclusive') {
+        if ($problem -eq 'truncated') { [IO.File]::WriteAllText($side27, '[{"name":') }
+        elseif ($problem -eq 'missing-original') { [IO.File]::WriteAllText($side27, '[{"name":"Large","existedBefore":true,"writtenValue":"x"}]') }
+        else { [IO.File]::WriteAllBytes($side27, $valid27) }
+        $sideHash27 = Get-FileSha256 $side27
+        $lock27 = if ($problem -eq 'exclusive') { [IO.File]::Open($side27,'Open','Read','None') }
+        try {
+            foreach ($op in 'install','uninstall') {
+                $message27 = ''
+                try {
+                    if ($op -eq 'install') { & $installPs1 @opts27 -SingleSize -Size Regular | Out-Null }
+                    else { & $uninstallPs1 -InstallDir $d27 -RegistryRoot $r27 -SkipCursorRefresh | Out-Null }
+                }
+                catch { $message27 = $_.Exception.Message }
+                Assert-True ($message27.Contains($side27)) "Case 27 ($problem/$op): Missing sidecar error"
+                Assert-True ((Get-Item $s27).GetValue($large27) -eq $saved27 -and (Get-Item $c27).GetValue('') -eq $large27 -and (Get-Item $c27).GetValue('Arrow') -eq $arrow27) "Case 27: Cursor state changed"
+                Assert-True ((Get-Item $run27).GetValue('BibataIceTrail') -eq $startup27 -and (@($files27 | ForEach-Object { Get-FileSha256 $_ }) -join ',') -eq $hashes27) "Case 27: Startup or files changed"
+            }
+        }
+        finally { if ($lock27) { $lock27.Dispose() } }
+        Assert-True ((Get-FileSha256 $side27) -eq $sideHash27) "Case 27: Sidecar was modified"
+    }
+    $args27 = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $uninstallPs1),'-InstallDir',('"{0}"' -f $d27),'-RegistryRoot',$r27,'-SkipCursorRefresh')
+    $out27 = Join-Path $testRoot 'case27-out.txt'
+    $err27 = Join-Path $testRoot 'case27-err.txt'
+    $lock27 = [IO.File]::Open($side27,'Open','Read','Read')
+    try {
+        $first27 = Start-Process powershell.exe -ArgumentList $args27 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out27 -RedirectStandardError $err27
+    }
+    finally { $lock27.Dispose() }
+    Assert-True ($first27.ExitCode -ne 0 -and -not ([IO.File]::ReadAllText($out27).Contains('Uninstall complete.'))) "Case 27: Locked sidecar reported success"
+    Assert-True (([IO.File]::ReadAllText($err27) -replace '\s','').Contains('bibata-runtime-schemes.json')) "Case 27: Failure did not identify the sidecar"
+    Assert-True ((Test-Path -LiteralPath $manifest27) -and (Get-FileSha256 $side27) -eq $sideHash27) "Case 27: Retry files lost"
+    $retry27 = Start-Process powershell.exe -ArgumentList $args27 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out27 -RedirectStandardError $err27
+    Assert-True ($retry27.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $d27)) "Case 27: Retry did not clean the installation"
+    Assert-True ((Get-Item $s27).GetValue($large27) -eq $user27 -and (Get-Item $s27).GetValueKind($large27) -eq 'ExpandString') "Case 27: Original same-name scheme lost"
+    Write-Host "PASS Case 27: Invalid or unreadable sidecar stops changes; a deletion lock reports failure and retry preserves the original scheme"
 
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched

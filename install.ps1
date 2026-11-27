@@ -410,39 +410,40 @@ function Get-RetainedSchemeFiles([string]$schemesPath, $schemeRecords, $previous
     return ,$files
 }
 
-function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
+function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap, [switch]$Optional) {
     if ([string]::IsNullOrWhiteSpace($installRoot) -or $null -eq $targetMap) { return }
     $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
-    if (-not (Test-Path -LiteralPath $rtPath -PathType Leaf)) { return }
     try {
         $runtimeState = Read-BibataRuntimeSchemes $rtPath
-        foreach ($item in $runtimeState.Records) {
-            if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) { continue }
-            $sName = [string]$item.name
-            if (-not $targetMap.Contains($sName)) {
-                $targetMap[$sName] = [ordered]@{
-                    existedBefore = [bool]$item.existedBefore
-                    previousValue = $item.previousValue
-                    previousKind  = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
-                    writtenValue  = [string]$item.writtenValue
-                }
-            }
-            else {
-                $existingRec = $targetMap[$sName]
-                $prevMatchesManifestWritten = ([bool]$item.existedBefore) -and
-                    [string]::Equals([string]$item.previousValue, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
-                if (-not $prevMatchesManifestWritten) {
-                    $existingRec.existedBefore = [bool]$item.existedBefore
-                    $existingRec.previousValue = $item.previousValue
-                    $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
-                }
-                if (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
-                    $existingRec.writtenValue = [string]$item.writtenValue
-                }
-            }
-        }
     }
     catch {
+        if ($Optional) { return }
+        throw
+    }
+    foreach ($item in $runtimeState.Records) {
+        if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) { continue }
+        $sName = [string]$item.name
+        if (-not $targetMap.Contains($sName)) {
+            $targetMap[$sName] = [ordered]@{
+                existedBefore = [bool]$item.existedBefore
+                previousValue = $item.previousValue
+                previousKind  = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
+                writtenValue  = [string]$item.writtenValue
+            }
+        }
+        else {
+            $existingRec = $targetMap[$sName]
+            $prevMatchesManifestWritten = ([bool]$item.existedBefore) -and
+                [string]::Equals([string]$item.previousValue, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
+            if (-not $prevMatchesManifestWritten) {
+                $existingRec.existedBefore = [bool]$item.existedBefore
+                $existingRec.previousValue = $item.previousValue
+                $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
+                $existingRec.writtenValue = [string]$item.writtenValue
+            }
+        }
     }
 }
 
@@ -491,7 +492,7 @@ function Resolve-InheritedSchemeSnapshot([string]$schemeName, $currentSnap, [str
             catch {
             }
         }
-        Import-RuntimeSchemeRecords $otherInstallDir $otherRecs
+        Import-RuntimeSchemeRecords $otherInstallDir $otherRecs -Optional
 
         if (-not $otherRecs.Contains($schemeName)) { break }
         $otherRec = $otherRecs[$schemeName]

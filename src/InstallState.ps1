@@ -36,21 +36,36 @@ function Write-BibataJson([string]$path, $value) {
 }
 
 function Read-BibataRuntimeSchemes([string]$path) {
-    $json = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
-    $parsed = ConvertFrom-Json -InputObject $json -ErrorAction Stop
-    # Assign before enumerating: Windows PowerShell 5.1 emits the JSON array as one pipeline object.
-    $records = @($parsed)
-    $needsRepair = $false
-    while ($records.Count -eq 1 -and $null -ne $records[0] -and
-           $records[0].PSObject.Properties['value'] -and $records[0].PSObject.Properties['Count']) {
-        # Older single-size installs serialized the PowerShell array wrapper.
-        $records = @($records[0].value)
-        $needsRepair = $true
-    }
-    foreach ($record in $records) {
-        if ([string]::IsNullOrWhiteSpace($record.name) -or $record.existedBefore -isnot [bool]) {
-            throw "Invalid cursor scheme backup '$path'."
+    if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return $null }
+    try {
+        $json = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+        # Preserve the root array, including empty and single-record backups, on both PowerShell versions.
+        $options = @{}
+        if ($PSVersionTable.PSVersion.Major -ge 7) { $options.NoEnumerate = $true }
+        $records = ConvertFrom-Json -InputObject $json -ErrorAction Stop @options
+        if ($records -isnot [array]) { throw "Expected an array of cursor scheme records." }
+        $needsRepair = $false
+        while ($records.Count -eq 1 -and $null -ne $records[0] -and
+               $records[0].PSObject.Properties['value'] -and $records[0].PSObject.Properties['Count']) {
+            # Older single-size installs serialized the PowerShell array wrapper.
+            $wrapper = $records[0]
+            $items = $wrapper.value
+            # Windows PowerShell can nest the wrapper on successive saves.
+            if ($null -eq $items -or $wrapper.Count -ne $items.Count -or
+                ($items -isnot [array] -and -not $items.PSObject.Properties['value'])) { throw "Invalid cursor scheme array wrapper." }
+            $records = @($items)
+            $needsRepair = $true
         }
+        foreach ($record in $records) {
+            if ($record -isnot [pscustomobject] -or $record.name -isnot [string] -or [string]::IsNullOrWhiteSpace($record.name) -or
+                $record.existedBefore -isnot [bool] -or ($record.existedBefore -and $record.previousValue -isnot [string]) -or
+                $record.writtenValue -isnot [string] -or [string]::IsNullOrWhiteSpace($record.writtenValue)) {
+                throw "Invalid cursor scheme backup record."
+            }
+        }
+        return [pscustomobject]@{ Records = $records; NeedsRepair = $needsRepair }
     }
-    return [pscustomobject]@{ Records = $records; NeedsRepair = $needsRepair }
+    catch {
+        throw "Cannot read cursor scheme backup '$path': $($_.Exception.Message)"
+    }
 }

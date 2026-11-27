@@ -334,6 +334,8 @@ $InstallDir = Resolve-BibataAbsolutePath $InstallDir
 
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
 $manifest = Read-BibataManifest $manifestPath
+$rtSchemesPath = Join-Path $InstallDir "bibata-runtime-schemes.json"
+$runtime = Read-BibataRuntimeSchemes $rtSchemesPath
 
 $trailDir = Join-Path $InstallDir "Bibata-Ice-Trail"
 $trailExe = if ($manifest -and -not [string]::IsNullOrWhiteSpace($manifest.trailExePath)) {
@@ -492,54 +494,46 @@ if ($manifest) {
                 }
             }
         }
-        $rtSchemesPath = Join-Path $InstallDir "bibata-runtime-schemes.json"
-        if (Test-Path -LiteralPath $rtSchemesPath -PathType Leaf) {
-            try {
-                $runtime = Read-BibataRuntimeSchemes $rtSchemesPath
-                foreach ($rtItem in $runtime.Records) {
-                    if (-not $rtItem -or [string]::IsNullOrWhiteSpace([string]$rtItem.name)) { continue }
-                    $rtName = [string]$rtItem.name
-                    $existingKey = $null
-                    foreach ($rk in $schemeRecordMap.Keys) {
-                        if ([string]::Equals([string]$rk, $rtName, [StringComparison]::OrdinalIgnoreCase)) {
-                            $existingKey = $rk
+        foreach ($rtItem in $runtime.Records) {
+            if (-not $rtItem -or [string]::IsNullOrWhiteSpace([string]$rtItem.name)) { continue }
+            $rtName = [string]$rtItem.name
+            $existingKey = $null
+            foreach ($rk in $schemeRecordMap.Keys) {
+                if ([string]::Equals([string]$rk, $rtName, [StringComparison]::OrdinalIgnoreCase)) {
+                    $existingKey = $rk
+                    break
+                }
+            }
+            if ($null -eq $existingKey) {
+                $schemeRecordMap[$rtName] = [ordered]@{
+                    existedBefore = [bool]$rtItem.existedBefore
+                    previousValue = $rtItem.previousValue
+                    previousKind  = if ([string]::IsNullOrWhiteSpace([string]$rtItem.previousKind)) { "String" } else { [string]$rtItem.previousKind }
+                    writtenValues = New-Object System.Collections.Generic.List[string]
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
+                    $schemeRecordMap[$rtName].writtenValues.Add([string]$rtItem.writtenValue)
+                }
+            }
+            else {
+                $existingRec = $schemeRecordMap[$existingKey]
+                $prevMatchedManifestWritten = $false
+                if ([bool]$rtItem.existedBefore) {
+                    foreach ($mwv in $existingRec.writtenValues) {
+                        if ([string]::Equals([string]$rtItem.previousValue, [string]$mwv, [StringComparison]::OrdinalIgnoreCase)) {
+                            $prevMatchedManifestWritten = $true
                             break
                         }
                     }
-                    if ($null -eq $existingKey) {
-                        $schemeRecordMap[$rtName] = [ordered]@{
-                            existedBefore = [bool]$rtItem.existedBefore
-                            previousValue = $rtItem.previousValue
-                            previousKind  = if ([string]::IsNullOrWhiteSpace([string]$rtItem.previousKind)) { "String" } else { [string]$rtItem.previousKind }
-                            writtenValues = New-Object System.Collections.Generic.List[string]
-                        }
-                        if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
-                            $schemeRecordMap[$rtName].writtenValues.Add([string]$rtItem.writtenValue)
-                        }
-                    }
-                    else {
-                        $existingRec = $schemeRecordMap[$existingKey]
-                        $prevMatchedManifestWritten = $false
-                        if ([bool]$rtItem.existedBefore) {
-                            foreach ($mwv in $existingRec.writtenValues) {
-                                if ([string]::Equals([string]$rtItem.previousValue, [string]$mwv, [StringComparison]::OrdinalIgnoreCase)) {
-                                    $prevMatchedManifestWritten = $true
-                                    break
-                                }
-                            }
-                        }
-                        if (-not $prevMatchedManifestWritten) {
-                            $existingRec.existedBefore = [bool]$rtItem.existedBefore
-                            $existingRec.previousValue = $rtItem.previousValue
-                            $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$rtItem.previousKind)) { "String" } else { [string]$rtItem.previousKind }
-                        }
-                        if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
-                            $existingRec.writtenValues.Add([string]$rtItem.writtenValue)
-                        }
-                    }
                 }
-            }
-            catch {
+                if (-not $prevMatchedManifestWritten) {
+                    $existingRec.existedBefore = [bool]$rtItem.existedBefore
+                    $existingRec.previousValue = $rtItem.previousValue
+                    $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$rtItem.previousKind)) { "String" } else { [string]$rtItem.previousKind }
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$rtItem.writtenValue)) {
+                    $existingRec.writtenValues.Add([string]$rtItem.writtenValue)
+                }
             }
         }
 
@@ -813,10 +807,7 @@ if (-not $KeepFiles) {
         }
     }
 
-    $rtSchemesCleanup = Join-Path $InstallDir "bibata-runtime-schemes.json"
-    if (Test-Path -LiteralPath $rtSchemesCleanup -PathType Leaf) {
-        Remove-Item -LiteralPath $rtSchemesCleanup -Force -ErrorAction SilentlyContinue
-    }
+    [void](Try-RemoveFileStrict $rtSchemesPath $failedDeletions)
 
     if ($failedDeletions.Count -gt 0) {
         if ($manifest) {
