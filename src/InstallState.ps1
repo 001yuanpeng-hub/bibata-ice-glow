@@ -1,4 +1,4 @@
-function Read-BibataManifest([string]$path) {
+﻿function Read-BibataManifest([string]$path) {
     if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return $null }
     try {
         $json = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop

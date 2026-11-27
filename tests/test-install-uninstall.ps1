@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = "Stop"
@@ -107,7 +107,7 @@ if ($realRunKey) {
 $lockProc = $null
 try {
     # PowerShell syntax validation
-    foreach ($psFile in @($installPs1, $uninstallPs1, (Join-Path $repoRoot 'src\InstallState.ps1'))) {
+    foreach ($psFile in @($installPs1, $uninstallPs1, (Join-Path $repoRoot 'src\InstallCommon.ps1'), (Join-Path $repoRoot 'src\InstallState.ps1'))) {
         $tokens = $null
         $errors = $null
         [System.Management.Automation.Language.Parser]::ParseFile($psFile, [ref]$tokens, [ref]$errors) | Out-Null
@@ -408,9 +408,12 @@ class FailLaunch {
     $generatedGenuineV1 = $false
     if (Test-Path $gitExe) {
         $v1ScriptBytes = & $gitExe -C $repoRoot show "effba4d:install.ps1" 2>$null
-        if ($LASTEXITCODE -eq 0 -and $v1ScriptBytes) {
+        $v1CsBytes = & $gitExe -C $repoRoot show "effba4d:src/BibataIceTrail.cs" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $v1ScriptBytes -and $v1CsBytes) {
+            $effba4dCs = Join-Path $testRoot "effba4d_BibataIceTrail.cs"
             [System.IO.File]::WriteAllText($effba4dInstall, ($v1ScriptBytes -join "`r`n"), [System.Text.Encoding]::UTF8)
-            & $effba4dInstall -InstallDir $d9 -Size Regular -NoLaunch -RegistryRoot $r9 -SkipCursorRefresh -SkipTaskScheduler -TestSourceOverride (Join-Path $repoRoot "src\BibataIceTrail.cs") -TestCursorZipPath $fixtureZip | Out-Null
+            [System.IO.File]::WriteAllText($effba4dCs, ($v1CsBytes -join "`r`n"), [System.Text.Encoding]::UTF8)
+            & $effba4dInstall -InstallDir $d9 -Size Regular -NoLaunch -RegistryRoot $r9 -SkipCursorRefresh -SkipTaskScheduler -TestSourceOverride $effba4dCs -TestCursorZipPath $fixtureZip | Out-Null
             $generatedGenuineV1 = $true
         }
     }
@@ -1244,7 +1247,6 @@ class FailLaunch {
 
     & $uninstallPs1 -InstallDir $d21 -RegistryRoot $r21 -SkipCursorRefresh | Out-Null
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "BibataIceTrail.exe"))) "Case 21: BibataIceTrail.exe was not removed!"
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "BibataIceTrail.cs"))) "Case 21: BibataIceTrail.cs was not removed!"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "config.ini"))) "Case 21: config.ini was not removed!"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $d21 "bibata-ice-glow-manifest.json"))) "Case 21: Manifest was not removed!"
     Assert-True (Test-Path -LiteralPath $rootBackup21 -PathType Leaf) "Case 21: Root user file my-palette-backup.ini was deleted by uninstall!"

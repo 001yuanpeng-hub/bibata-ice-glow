@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$InstallDir = "",
     [ValidateSet("Modern", "Original")]
@@ -28,6 +28,7 @@ try {
 }
 catch {
 }
+. (Join-Path $PSScriptRoot "src\InstallCommon.ps1")
 . (Join-Path $PSScriptRoot "src\InstallState.ps1")
 
 function Clear-StaleBibataStagingDirs {
@@ -44,17 +45,6 @@ function Clear-StaleBibataStagingDirs {
         }
     }
     catch {
-    }
-}
-
-function Normalize-BibataPath([string]$p) {
-    if ([string]::IsNullOrWhiteSpace($p)) { return "" }
-    $clean = $p.Trim().Trim('"')
-    try {
-        return [System.IO.Path]::GetFullPath($clean).TrimEnd('\').ToLowerInvariant()
-    }
-    catch {
-        return $clean.TrimEnd('\').ToLowerInvariant()
     }
 }
 
@@ -77,15 +67,6 @@ function Remove-PathFromList($list, [string]$targetPath) {
     }
 }
 
-function Resolve-BibataAbsolutePath([string]$rawPath) {
-    if ([string]::IsNullOrWhiteSpace($rawPath)) { return "" }
-    $trimmed = $rawPath.Trim().Trim('"')
-    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($trimmed)
-    $full = [System.IO.Path]::GetFullPath($resolved)
-    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }
-    return $full
-}
-
 function Test-CursorSizeComplete([string]$dirPath, $roleMap) {
     if ([string]::IsNullOrWhiteSpace($dirPath) -or -not (Test-Path -LiteralPath $dirPath -PathType Container)) {
         return $false
@@ -97,11 +78,6 @@ function Test-CursorSizeComplete([string]$dirPath, $roleMap) {
         }
     }
     return $true
-}
-
-function Get-FileSha256([string]$path) {
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return "" }
-    return (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
 }
 
 function Write-FileFreshInode([string]$srcFile, [string]$dstFile) {
@@ -155,47 +131,6 @@ function Restore-FileBackup([string]$backupPath, [string]$targetPath) {
         Write-Warning "Could not restore backup for ${targetPath}: $($_.Exception.Message); keeping backup at $backupPath"
         return $false
     }
-}
-
-function Refresh-WindowsCursors {
-    Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public static class BibataCursorApi {
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
-}
-"@ -ErrorAction SilentlyContinue | Out-Null
-    $ok = [BibataCursorApi]::SystemParametersInfo(0x0057, 0, [IntPtr]::Zero, 0x02)
-    if (-not $ok) {
-        Write-Warning "SystemParametersInfo(SPI_SETCURSORS) returned False; please re-apply scheme in main.cpl if needed."
-    }
-}
-
-function Get-BibataProcessesByExe([string]$targetExe) {
-    $normTarget = Normalize-BibataPath $targetExe
-    $matches = New-Object System.Collections.Generic.List[object]
-    try {
-        $procs = Get-CimInstance Win32_Process -Filter "Name = 'BibataIceTrail.exe'" -ErrorAction SilentlyContinue
-        foreach ($p in $procs) {
-            if ((Normalize-BibataPath $p.ExecutablePath) -eq $normTarget) {
-                $matches.Add([pscustomobject]@{ Id = [int]$p.ProcessId; Path = $p.ExecutablePath })
-            }
-        }
-    }
-    catch {
-        $gp = Get-Process -Name "BibataIceTrail" -ErrorAction SilentlyContinue
-        foreach ($p in $gp) {
-            try {
-                if ((Normalize-BibataPath $p.MainModule.FileName) -eq $normTarget) {
-                    $matches.Add([pscustomobject]@{ Id = [int]$p.Id; Path = $p.MainModule.FileName })
-                }
-            }
-            catch {
-            }
-        }
-    }
-    return $matches
 }
 
 function Snapshot-RegValue([string]$keyPath, [string]$valueName) {
@@ -277,56 +212,6 @@ function Snapshot-CursorState([string]$cursorsPath) {
     return $state
 }
 
-function Restore-CursorState([string]$cursorsPath, $prevState) {
-    if (-not $prevState -or -not $prevState.existed) {
-        if (Test-Path $cursorsPath) {
-            $k = Get-Item -Path $cursorsPath -ErrorAction SilentlyContinue
-            if ($k -and $k.SubKeyCount -eq 0) {
-                Remove-Item -Path $cursorsPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-        return
-    }
-    if (-not (Test-Path $cursorsPath)) {
-        New-Item -Path $cursorsPath -Force | Out-Null
-    }
-    if ($null -ne $prevState.defaultScheme) {
-        Set-ItemProperty -Path $cursorsPath -Name "(Default)" -Value ([string]$prevState.defaultScheme) -Type String
-    }
-    else {
-        Remove-ItemProperty -Path $cursorsPath -Name "(Default)" -ErrorAction SilentlyContinue
-    }
-    if ($null -ne $prevState.schemeSource) {
-        Set-ItemProperty -Path $cursorsPath -Name "Scheme Source" -Value ([int]$prevState.schemeSource) -Type DWord
-    }
-    else {
-        Remove-ItemProperty -Path $cursorsPath -Name "Scheme Source" -ErrorAction SilentlyContinue
-    }
-    if ($prevState.roles) {
-        $pairs = New-Object System.Collections.Generic.List[object]
-        if ($prevState.roles -is [System.Collections.IDictionary]) {
-            foreach ($roleName in $prevState.roles.Keys) {
-                $pairs.Add([pscustomobject]@{ Name = [string]$roleName; Value = $prevState.roles[$roleName] })
-            }
-        }
-        else {
-            foreach ($prop in $prevState.roles.PSObject.Properties) {
-                $pairs.Add([pscustomobject]@{ Name = [string]$prop.Name; Value = $prop.Value })
-            }
-        }
-        foreach ($pair in $pairs) {
-            if ($null -eq $pair.Value) {
-                Remove-ItemProperty -Path $cursorsPath -Name $pair.Name -ErrorAction SilentlyContinue
-            }
-            else {
-                $valStr = [string]$pair.Value
-                $regType = if ($valStr -like "*%*") { "ExpandString" } else { "String" }
-                Set-ItemProperty -Path $cursorsPath -Name $pair.Name -Value $valStr -Type $regType
-            }
-        }
-    }
-}
-
 function Resolve-InheritedCursorState($currentState, [string]$currentInstallDir) {
     $state = $currentState
     if (-not $state -or -not $state.existed) { return $state }
@@ -370,21 +255,6 @@ function Resolve-InheritedCursorState($currentState, [string]$currentInstallDir)
         break
     }
     return $state
-}
-
-function Test-SchemeValueValid([string]$schemeVal) {
-    if ($null -eq $schemeVal) { return $false }
-    if ([string]::IsNullOrWhiteSpace($schemeVal)) { return $true }
-    $parts = $schemeVal -split ','
-    foreach ($part in $parts) {
-        $trimmed = $part.Trim()
-        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-        $expanded = [Environment]::ExpandEnvironmentVariables($trimmed)
-        if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) {
-            return $false
-        }
-    }
-    return $true
 }
 
 function Test-AllSchemePathsUnderDir([string]$schemeVal, [string]$dirRoot) {
@@ -717,7 +587,6 @@ $roleMap = [ordered]@{
 }
 
 $trailStageDir = ""
-$stagedCs = ""
 $stagedExe = ""
 $cursorStageDir = ""
 $cursorStageExtract = ""
@@ -732,9 +601,22 @@ try {
         if ([string]::IsNullOrWhiteSpace($repoRoot)) {
             $repoRoot = (Get-Location).Path
         }
-        $srcCs = if (-not [string]::IsNullOrWhiteSpace($TestSourceOverride)) { $TestSourceOverride } else { Join-Path $repoRoot "src\BibataIceTrail.cs" }
-        if (-not (Test-Path -LiteralPath $srcCs)) {
-            throw "Source file not found: $srcCs. Please run install.ps1 from the cloned repository directory."
+        $srcFilesToCompile = New-Object System.Collections.Generic.List[string]
+        if (-not [string]::IsNullOrWhiteSpace($TestSourceOverride)) {
+            if (-not (Test-Path -LiteralPath $TestSourceOverride -PathType Leaf)) {
+                throw "Source file not found: $TestSourceOverride"
+            }
+            $srcFilesToCompile.Add($TestSourceOverride)
+        }
+        else {
+            $srcDir = Join-Path $repoRoot "src"
+            $foundCs = @(Get-ChildItem -LiteralPath $srcDir -Filter "*.cs" -File -ErrorAction SilentlyContinue | Sort-Object Name)
+            if ($foundCs.Count -eq 0) {
+                throw "No C# source files found under $srcDir. Please run install.ps1 from the cloned repository directory."
+            }
+            foreach ($csItem in $foundCs) {
+                $srcFilesToCompile.Add($csItem.FullName)
+            }
         }
 
         $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
@@ -750,14 +632,27 @@ try {
         $trailStageDir = Join-Path $env:TEMP ("bibata_ice_stage_" + [Guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $trailStageDir -Force | Out-Null
 
-        $stagedCs = Join-Path $trailStageDir "BibataIceTrail.cs"
         $stagedExe = Join-Path $trailStageDir "BibataIceTrail.exe"
         $selfTestLog = Join-Path $trailStageDir "bibata_ice_trail_selftest.log"
-
-        Copy-Item -LiteralPath $srcCs -Destination $stagedCs -Force
+        $stagedCsFiles = New-Object System.Collections.Generic.List[string]
+        foreach ($sf in $srcFilesToCompile) {
+            $dstStageCs = Join-Path $trailStageDir ([System.IO.Path]::GetFileName($sf))
+            Copy-Item -LiteralPath $sf -Destination $dstStageCs -Force
+            $stagedCsFiles.Add($dstStageCs)
+        }
 
         Write-Host "Compiling candidate BibataIceTrail.exe in staging directory..." -ForegroundColor Yellow
-        & $csc /nologo /target:winexe /platform:$platform /optimize+ /unsafe /warnaserror /r:System.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll "/out:$stagedExe" $stagedCs
+        $cscArgs = New-Object System.Collections.Generic.List[string]
+        foreach ($arg in @(
+            "/nologo", "/target:winexe", "/platform:$platform", "/optimize+", "/unsafe", "/warnaserror",
+            "/r:System.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/out:$stagedExe"
+        )) {
+            $cscArgs.Add($arg)
+        }
+        foreach ($scf in $stagedCsFiles) {
+            $cscArgs.Add($scf)
+        }
+        & $csc @cscArgs
         if ($LASTEXITCODE -ne 0) {
             throw "Candidate compilation failed with exit code $LASTEXITCODE; existing installation untouched."
         }
@@ -923,16 +818,13 @@ try {
 
     $trailDir = Join-Path $InstallDir "Bibata-Ice-Trail"
     $trailDirExistedBefore = Test-Path -LiteralPath $trailDir
-    $destCs = Join-Path $trailDir "BibataIceTrail.cs"
     $destExe = Join-Path $trailDir "BibataIceTrail.exe"
     $cfgPath = Join-Path $trailDir "config.ini"
     $exeExistedBefore = $false
-    $csExistedBefore = $false
     $cfgExistedBefore = $false
     # Outside the install directory so user backups survive both upgrade and rollback.
     $backupPrefix = Join-Path $env:TEMP ("bibata-trail-rollback-" + [Guid]::NewGuid().ToString("N"))
     $exeBak = "$backupPrefix.exe.bak"
-    $csBak = "$backupPrefix.cs.bak"
     $cfgBak = "$backupPrefix.ini.bak"
     $runKey = Join-Path $RegistryRoot "Software\Microsoft\Windows\CurrentVersion\Run"
     $runSnapBefore = $null
@@ -944,7 +836,6 @@ try {
 
     if (-not $SkipTrail) {
         $exeExistedBefore = Test-Path -LiteralPath $destExe
-        $csExistedBefore = Test-Path -LiteralPath $destCs
         $cfgExistedBefore = Test-Path -LiteralPath $cfgPath
         $ownsConfig = -not $cfgExistedBefore -or $managedTrailFiles -contains $cfgPath
         if ($ownsConfig) { $userConfigBackup = $null }
@@ -1220,7 +1111,6 @@ try {
             }
 
             if ($exeExistedBefore) { Write-FileFreshInode $destExe $exeBak }
-            if ($csExistedBefore) { Write-FileFreshInode $destCs $csBak }
             if ($cfgExistedBefore) { Write-FileFreshInode $cfgPath $cfgBak }
 
             if ($wasRunning) {
@@ -1231,7 +1121,6 @@ try {
             }
 
             $trailFilesModified = $true
-            Copy-Item -LiteralPath $stagedCs -Destination $destCs -Force
             Copy-Item -LiteralPath $stagedExe -Destination $destExe -Force
 
             if (-not [string]::IsNullOrWhiteSpace($Palette)) {
@@ -1294,7 +1183,6 @@ try {
             $managedTrail = $true
             $prevTrailExePath = $destExe
             Add-UniquePath $managedTrailFiles $destExe
-            Add-UniquePath $managedTrailFiles $destCs
             Add-UniquePath $managedTrailFiles (Join-Path $trailDir "BibataIceTrail.log")
             Add-UniquePath $managedTrailFiles (Join-Path $trailDir "BibataIceTrail.log.old")
             # The running app can create config.ini after a -NoLaunch install.
@@ -1356,7 +1244,6 @@ try {
 
         if (-not $SkipTrail) {
             if (Test-Path -LiteralPath $exeBak) { Remove-Item -LiteralPath $exeBak -Force -ErrorAction SilentlyContinue }
-            if (Test-Path -LiteralPath $csBak) { Remove-Item -LiteralPath $csBak -Force -ErrorAction SilentlyContinue }
             if (Test-Path -LiteralPath $cfgBak) { Remove-Item -LiteralPath $cfgBak -Force -ErrorAction SilentlyContinue }
         }
         if (-not [string]::IsNullOrWhiteSpace($cursorBackupDir) -and (Test-Path -LiteralPath $cursorBackupDir)) {
@@ -1372,13 +1259,6 @@ try {
                 Stop-Process -Id $np.Id -Force -ErrorAction SilentlyContinue
             }
             if ($newProcs.Count -gt 0) { Start-Sleep -Milliseconds 250 }
-
-            if ($csExistedBefore) {
-                Restore-FileBackup $csBak $destCs | Out-Null
-            }
-            elseif ($trailFilesModified -and (Test-Path -LiteralPath $destCs)) {
-                Remove-Item -LiteralPath $destCs -Force -ErrorAction SilentlyContinue
-            }
 
             if ($exeExistedBefore) {
                 Restore-FileBackup $exeBak $destExe | Out-Null
@@ -1419,7 +1299,7 @@ try {
         if (-not $SkipCursor) {
             if ($cursorRegistryApplied) {
                 try {
-                    Restore-CursorState $cursorsKey $cursorsStateBeforeThisRun
+                    Restore-CursorState $cursorsKey $cursorsStateBeforeThisRun -RemoveKeyIfNotExisted
                     Restore-RegValue $schemesKey $schemeName $schemeSnapBefore
                     foreach ($pr in $prunedSchemeRollbacks) {
                         Restore-RegValue $schemesKey $pr.Name $pr.Snapshot
