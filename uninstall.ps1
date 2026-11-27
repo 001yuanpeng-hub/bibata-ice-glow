@@ -2,7 +2,9 @@
 param(
     [string]$InstallDir = "",
     [switch]$KeepFiles,
+    [Parameter(DontShow = $true)]
     [string]$RegistryRoot = "HKCU:",
+    [Parameter(DontShow = $true)]
     [switch]$SkipCursorRefresh
 )
 

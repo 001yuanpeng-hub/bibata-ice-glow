@@ -1,6 +1,8 @@
 # Bibata Ice Glow (Windows 10/11)
 
-将开源的 **Bibata-Modern-Ice** 鼠标指针主题与专属轻量级 **冰蓝流光拖尾 + 点击波纹** 合二为一，开箱即用、零第三方依赖、自动开机生效。
+将开源的 **Bibata-Modern-Ice** 鼠标指针主题与专属轻量级 **冰蓝流光拖尾 + 点击波纹** 合二为一，开箱即用、零外部 SDK/NuGet 依赖、自动开机生效。
+
+> **前置条件**：Windows 10/11、系统自带 PowerShell 5.1（或 PowerShell 7+）、系统内置 .NET Framework 4.x（`csc.exe`）；在线下载指针包需可访问 GitHub Releases（受限或离线环境支持通过 `-CursorZipPath` 传入本地包）。
 
 ![Bibata Ice Glow Demo](assets/demo.gif)
 
@@ -27,7 +29,8 @@
     - `Ctrl + Alt + Shift + S`：一键循环切换 **Bibata 指针大小**（`Regular` 标准 → `Large` 大号 → `Extra-Large` 超大号，即时刷新生效；若未安装 Bibata 指针目录则自动跳过）。
     - `Ctrl + Alt + Shift + D`：一键循环切换 **光影大小/强度预设**（`轻盈 Light` → `标准 Standard` → `灵动 Vivid`），伴随对应粗细的预览光环并自动保存。
   - **全屏应用自动暂停**（仅在独占全屏 Direct3D 游戏时自动隐藏）& **开机自动启动**（安装时默认开启）。
-  - **可选托盘菜单 / 配置文件定制**：如需临时呼出托盘菜单切换预设、自定义颜色或单独开关某项特效，可在安装目录 `Bibata-Ice-Trail\config.ini` 中添加 `ShowTrayIcon=true` 后重启，或在启动程序时传入 `--show-tray` 参数；也可直接修改 `config.ini` 中的键值（常用键：`Enabled`、`TrailEnabled`、`ClickRippleEnabled`、`DragGlowEnabled`、`ShakeLocateEnabled`、`ScrollGlowEnabled`、`HotkeyEnabled`、`Preset`、`Palette`、`CustomColor`、`AutoPauseFullscreen`、`ShowTrayIcon`）。
+  - **可选托盘菜单 / 配置文件定制**：首次安装默认不强制创建 `config.ini`（当按快捷键或通过托盘菜单修改设置时自动生成）。如需手动配置或开启托盘图标，可参考仓库根目录的 [config.example.ini](config.example.ini)，将其复制到 `<InstallDir>\Bibata-Ice-Trail\config.ini` 并重启程序，或在启动时传入 `--show-tray` 参数。
+  - **运行日志与一键诊断**：程序会在 `Bibata-Ice-Trail\BibataIceTrail.log` 写入轻量滚动日志（上限 ~256 KB，记录启动环境、热键注册警告与未捕获异常）；运行 `BibataIceTrail.exe --diagnose` 可输出当前 PID、会话、Job 状态、多屏 DPI 与指针配置摘要便于排错。
   - **轻量省内存与磁盘去重**：鼠标静止 3 秒后自动回收大尺寸渲染缓存并压缩堆内存；安装脚本默认自动清理未使用的冗余光标附件，并对重复大动画文件做 NTFS 硬链接去重（磁盘占用从 ~10 MB 降至 ~5.6 MB，亦可传 `-SingleSize` 进一步精简）。
   - **系统安全层边界说明**：光影覆盖层会自动刷新置顶以覆盖普通置顶窗口和右键菜单；Windows 11 的**开始菜单、快捷设置/控制中心、锁屏与 UAC 弹窗**位于系统保护的高层级窗口带（Window Band），出于系统安全限制会渲染在用户态悬浮特效之上。
   - **多款光影配色**：支持 `冰蓝 Ice`（`0`）、`极光青 Cyan`（`1`）、`霜白 Frost`（`2`）、**`粉蓝幻梦 PinkBlue`（`4`，樱花粉 ↔ 冰蓝动态双色渐变）**、**`流光七彩 Rainbow`（`5`，全光谱流动虹彩渐变）** 以及自定义纯色（`3` + `CustomColor`）。
@@ -61,6 +64,12 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -SkipCursor
 
 # 极简磁盘模式：安装选中尺寸，清理其他尺寸中未被保留方案引用的指针文件
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -SingleSize
+
+# 离线 / 代理受限环境：使用手动下载的 zip 或已解压目录安装
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -CursorZipPath "C:\Downloads\Bibata-Modern-Ice-Windows.zip"
+
+# 指定上游 Bibata_Cursor 版本标签（默认拉取最新）
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Version "v2.0.7"
 ```
 
 - 默认安装路径：若存在 `D:\Software` 则装入 `D:\Software\Cursors`，否则自动装入 `%LOCALAPPDATA%\BibataIceGlow`。
@@ -94,7 +103,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
    - 从 `ful1e5/Bibata_Cursor` 下载最新 `Bibata-*-Ice-Windows.zip` 并写入 `HKCU:\Control Panel\Cursors` 立即刷新生效；
    - 本地编译 `src/BibataIceTrail.cs` 为 `BibataIceTrail.exe` 并通过 `--self-test` 自检；
    - 写入 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Run` 实现开机自动启动，并立即在桌面会话后台静默运行（默认不显示托盘图标，快捷键：`Ctrl+Alt+Shift+G` 开关、`Ctrl+Alt+Shift+C` 换色、`Ctrl+Alt+Shift+S` 指针大小、`Ctrl+Alt+Shift+D` 光影大小；如需调整配置可编辑 `<InstallDir>\Bibata-Ice-Trail\config.ini` 或带 `--show-tray` 参数启动）。
-4. 验证完成标准：确认 `Get-Process -Name BibataIceTrail` 正在用户会话中运行（`Responding = True`），且 `HKCU:\Control Panel\Cursors` 指向已下载的 Bibata `.cur`/`.ani` 文件。
+4. 验证完成标准：确认 `Get-Process -Name BibataIceTrail` 正在用户会话中运行（`Responding = True`），且 `HKCU:\Control Panel\Cursors` 指向已下载的 Bibata `.cur`/`.ani` 文件。若在带 `KILL_ON_JOB_CLOSE` 的沙箱/Agent 会话中安装且脱离式启动回退到了普通子进程，提示用户从资源管理器运行一次 `BibataIceTrail.exe` 或注销重登即可常驻。
 
 ---
 

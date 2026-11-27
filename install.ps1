@@ -15,10 +15,15 @@ param(
     [Alias("TestCursorZipPath")]
     [string]$CursorZipPath = "",
     [string]$Version = "",
+    [Parameter(DontShow = $true)]
     [string]$RegistryRoot = "HKCU:",
+    [Parameter(DontShow = $true)]
     [switch]$SkipCursorRefresh,
+    [Parameter(DontShow = $true)]
     [switch]$SkipTaskScheduler,
+    [Parameter(DontShow = $true)]
     [string]$TestSourceOverride = "",
+    [Parameter(DontShow = $true)]
     [string]$LaunchArgs = ""
 )
 
@@ -648,6 +653,12 @@ try {
             "/r:System.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll", "/out:$stagedExe"
         )) {
             $cscArgs.Add($arg)
+        }
+        $srcManifest = Join-Path $repoRoot "src\app.manifest"
+        if (Test-Path -LiteralPath $srcManifest -PathType Leaf) {
+            $stagedManifest = Join-Path $trailStageDir "app.manifest"
+            Copy-Item -LiteralPath $srcManifest -Destination $stagedManifest -Force
+            $cscArgs.Add("/win32manifest:$stagedManifest")
         }
         foreach ($scf in $stagedCsFiles) {
             $cscArgs.Add($scf)
