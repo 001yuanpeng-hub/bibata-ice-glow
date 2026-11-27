@@ -21,6 +21,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "src\InstallState.ps1")
 
 function Normalize-BibataPath([string]$p) {
     if ([string]::IsNullOrWhiteSpace($p)) { return "" }
@@ -347,30 +348,102 @@ function Resolve-InheritedCursorState($currentState, [string]$currentInstallDir)
     return $state
 }
 
-function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap) {
-    if ([string]::IsNullOrWhiteSpace($installRoot) -or $null -eq $targetMap) { return }
-    $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
-    if (-not (Test-Path -LiteralPath $rtPath -PathType Leaf)) { return }
-    try {
-        $rtItems = Get-Content -LiteralPath $rtPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (-not $rtItems) { return }
-        foreach ($item in @($rtItems)) {
-            if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) { continue }
-            $sName = [string]$item.name
-            if (-not $targetMap.Contains($sName)) {
-                $targetMap[$sName] = [ordered]@{
-                    existedBefore = [bool]$item.existedBefore
-                    previousValue = $item.previousValue
-                    previousKind  = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
-                    writtenValue  = [string]$item.writtenValue
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
-                $targetMap[$sName].writtenValue = [string]$item.writtenValue
+function Test-SchemeValueValid([string]$schemeVal) {
+    if ($null -eq $schemeVal) { return $false }
+    if ([string]::IsNullOrWhiteSpace($schemeVal)) { return $true }
+    $parts = $schemeVal -split ','
+    foreach ($part in $parts) {
+        $trimmed = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        $expanded = [Environment]::ExpandEnvironmentVariables($trimmed)
+        if (-not (Test-Path -LiteralPath $expanded -PathType Leaf)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-AllSchemePathsUnderDir([string]$schemeVal, [string]$dirRoot) {
+    if ([string]::IsNullOrWhiteSpace($schemeVal) -or [string]::IsNullOrWhiteSpace($dirRoot)) { return $false }
+    $normRoot = Normalize-BibataPath $dirRoot
+    if ([string]::IsNullOrEmpty($normRoot)) { return $false }
+    $prefix = $normRoot + "\"
+    $nonEmptyCount = 0
+    foreach ($part in ($schemeVal -split ',')) {
+        $trimmed = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        $nonEmptyCount++
+        $normPart = Normalize-BibataPath ([Environment]::ExpandEnvironmentVariables($trimmed))
+        if (-not ($normPart -eq $normRoot -or $normPart.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase))) {
+            return $false
+        }
+    }
+    return ($nonEmptyCount -gt 0)
+}
+
+function Get-RetainedSchemeFiles([string]$schemesPath, $schemeRecords, $previousState, $roleMap) {
+    $values = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $schemesPath) {
+        $schemes = Get-Item -LiteralPath $schemesPath
+        foreach ($name in $schemes.GetValueNames()) {
+            if ($name) {
+                $raw = $schemes.GetValue($name, "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                $values.Add([string]$raw)
             }
         }
     }
+    # A later uninstall may restore these values even when their schemes are inactive.
+    foreach ($record in $schemeRecords.Values) {
+        if ($record.existedBefore) { $values.Add([string]$record.previousValue) }
+    }
+    foreach ($role in $roleMap.Keys) {
+        $values.Add([string]$previousState.roles.$role)
+    }
+
+    $files = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($value in $values) {
+        foreach ($part in ($value -split ',')) {
+            $path = [Environment]::ExpandEnvironmentVariables($part.Trim().Trim('"'))
+            if ($path) { [void]$files.Add((Normalize-BibataPath $path)) }
+        }
+    }
+    return ,$files
+}
+
+function Import-RuntimeSchemeRecords([string]$installRoot, $targetMap, [switch]$Optional) {
+    if ([string]::IsNullOrWhiteSpace($installRoot) -or $null -eq $targetMap) { return }
+    $rtPath = Join-Path $installRoot "bibata-runtime-schemes.json"
+    try {
+        $runtimeState = Read-BibataRuntimeSchemes $rtPath
+    }
     catch {
+        if ($Optional) { return }
+        throw
+    }
+    foreach ($item in $runtimeState.Records) {
+        if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.name)) { continue }
+        $sName = [string]$item.name
+        if (-not $targetMap.Contains($sName)) {
+            $targetMap[$sName] = [ordered]@{
+                existedBefore = [bool]$item.existedBefore
+                previousValue = $item.previousValue
+                previousKind  = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
+                writtenValue  = [string]$item.writtenValue
+            }
+        }
+        else {
+            $existingRec = $targetMap[$sName]
+            $prevMatchesManifestWritten = ([bool]$item.existedBefore) -and
+                [string]::Equals([string]$item.previousValue, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
+            if (-not $prevMatchesManifestWritten) {
+                $existingRec.existedBefore = [bool]$item.existedBefore
+                $existingRec.previousValue = $item.previousValue
+                $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$item.previousKind)) { "String" } else { [string]$item.previousKind }
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$item.writtenValue)) {
+                $existingRec.writtenValue = [string]$item.writtenValue
+            }
+        }
     }
 }
 
@@ -419,7 +492,7 @@ function Resolve-InheritedSchemeSnapshot([string]$schemeName, $currentSnap, [str
             catch {
             }
         }
-        Import-RuntimeSchemeRecords $otherInstallDir $otherRecs
+        Import-RuntimeSchemeRecords $otherInstallDir $otherRecs -Optional
 
         if (-not $otherRecs.Contains($schemeName)) { break }
         $otherRec = $otherRecs[$schemeName]
@@ -509,18 +582,12 @@ if (-not [string]::IsNullOrWhiteSpace($TestSourceOverride)) {
 Write-Host "Install directory: $InstallDir" -ForegroundColor Cyan
 
 $manifestPath = Join-Path $InstallDir "bibata-ice-glow-manifest.json"
-$prevManifest = $null
-if (Test-Path -LiteralPath $manifestPath) {
-    try {
-        $prevManifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    }
-    catch {
-        $prevManifest = $null
-    }
-}
+$prevManifest = Read-BibataManifest $manifestPath
+$userConfigBackup = $prevManifest.userConfigBackup
 
 $managedCursor = $false
 $managedTrail = $false
+$managedTrailFiles = New-Object System.Collections.Generic.List[string]
 $managedThemeDirs = New-Object System.Collections.Generic.List[string]
 $managedCursorDirs = New-Object System.Collections.Generic.List[string]
 $managedCursorFiles = New-Object System.Collections.Generic.List[string]
@@ -535,6 +602,17 @@ if ($prevManifest) {
     if ($prevManifest.managedTrail) { $managedTrail = $true }
     if ($prevManifest.autoStartManaged) { $autoStartManaged = $true }
     if (-not [string]::IsNullOrWhiteSpace($prevManifest.trailExePath)) { $prevTrailExePath = [string]$prevManifest.trailExePath }
+    if ($prevManifest.managedTrailFiles) {
+        foreach ($tf in $prevManifest.managedTrailFiles) { Add-UniquePath $managedTrailFiles ([string]$tf) }
+    }
+    elseif ($prevManifest.managedTrail -and -not $prevManifest.PSObject.Properties['managedTrailFiles']) {
+        Add-UniquePath $managedTrailFiles $prevTrailExePath
+        Add-UniquePath $managedTrailFiles (Join-Path $InstallDir 'Bibata-Ice-Trail\BibataIceTrail.cs')
+    }
+    if ($prevManifest.schemaVersion -lt 3) {
+        # Earlier installers listed even pre-existing configs as their own.
+        Remove-PathFromList $managedTrailFiles (Join-Path $InstallDir 'Bibata-Ice-Trail\config.ini')
+    }
     if ($prevManifest.managedThemeDirs) {
         foreach ($d in $prevManifest.managedThemeDirs) { Add-UniquePath $managedThemeDirs ([string]$d) }
     }
@@ -744,6 +822,8 @@ try {
     $cursorBackupDir = ""
     $overwrittenCursorBackups = New-Object System.Collections.Generic.List[object]
     $backedUpCursorNormSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $prunedSchemeRollbacks = New-Object System.Collections.Generic.List[object]
+    $prunedSchemeNames = New-Object System.Collections.Generic.List[string]
     $cursorRegistryApplied = $false
 
     if (-not $SkipCursor) {
@@ -763,9 +843,11 @@ try {
     $exeExistedBefore = $false
     $csExistedBefore = $false
     $cfgExistedBefore = $false
-    $exeBak = "$destExe.bak"
-    $csBak = "$destCs.bak"
-    $cfgBak = "$cfgPath.bak"
+    # Outside the install directory so user backups survive both upgrade and rollback.
+    $backupPrefix = Join-Path $env:TEMP ("bibata-trail-rollback-" + [Guid]::NewGuid().ToString("N"))
+    $exeBak = "$backupPrefix.exe.bak"
+    $csBak = "$backupPrefix.cs.bak"
+    $cfgBak = "$backupPrefix.ini.bak"
     $runKey = Join-Path $RegistryRoot "Software\Microsoft\Windows\CurrentVersion\Run"
     $runSnapBefore = $null
     $runningProcs = @()
@@ -778,6 +860,8 @@ try {
         $exeExistedBefore = Test-Path -LiteralPath $destExe
         $csExistedBefore = Test-Path -LiteralPath $destCs
         $cfgExistedBefore = Test-Path -LiteralPath $cfgPath
+        $ownsConfig = -not $cfgExistedBefore -or $managedTrailFiles -contains $cfgPath
+        if ($ownsConfig) { $userConfigBackup = $null }
         $runSnapBefore = Snapshot-RegValue $runKey "BibataIceTrail"
         $runningProcs = @(Get-BibataProcessesByExe $destExe)
         $wasRunning = ($runningProcs.Count -gt 0)
@@ -905,8 +989,49 @@ try {
                     if (-not [string]::IsNullOrEmpty($nm)) { $managedDirNormSet.Add($nm) | Out-Null }
                 }
 
-                foreach ($extraSz in @("Regular", "Large", "Extra-Large")) {
-                    if ($extraSz -eq $Size) { continue }
+                $extraSizes = @("Regular", "Large", "Extra-Large") | Where-Object { $_ -ne $Size }
+                foreach ($extraSz in $extraSizes) {
+                    $extraSizeDir = Join-Path $themeRoot "$themeName-$extraSz-Windows"
+                    $extraSchemeName = "$themeName ($extraSz)"
+                    if (Test-Path $schemesKey) {
+                        $extraSchemeSnap = Snapshot-RegValue $schemesKey $extraSchemeName
+                        if ($extraSchemeSnap.valExisted) {
+                            if ($managedSchemeRecords.Contains($extraSchemeName)) {
+                                $extraRec = $managedSchemeRecords[$extraSchemeName]
+                                if ([string]::Equals([string]$extraSchemeSnap.value, [string]$extraRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $prunedSchemeRollbacks.Add([pscustomobject]@{ Name = $extraSchemeName; Snapshot = $extraSchemeSnap })
+                                    if ([bool]$extraRec.existedBefore -and (Test-SchemeValueValid ([string]$extraRec.previousValue))) {
+                                        $ek = if ([string]::IsNullOrWhiteSpace([string]$extraRec.previousKind)) { "String" } else { [string]$extraRec.previousKind }
+                                        Set-ItemProperty -Path $schemesKey -Name $extraSchemeName -Value ([string]$extraRec.previousValue) -Type $ek
+                                    }
+                                    else {
+                                        Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction SilentlyContinue
+                                    }
+                                    $managedSchemeRecords.Remove($extraSchemeName)
+                                    for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
+                                        if ([string]::Equals([string]$managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
+                                            $managedSchemes.RemoveAt($si)
+                                        }
+                                    }
+                                    $prunedSchemeNames.Add($extraSchemeName)
+                                }
+                            }
+                            elseif (Test-AllSchemePathsUnderDir ([string]$extraSchemeSnap.value) $extraSizeDir) {
+                                $prunedSchemeRollbacks.Add([pscustomobject]@{ Name = $extraSchemeName; Snapshot = $extraSchemeSnap })
+                                Remove-ItemProperty -Path $schemesKey -Name $extraSchemeName -ErrorAction SilentlyContinue
+                                for ($si = $managedSchemes.Count - 1; $si -ge 0; $si--) {
+                                    if ([string]::Equals([string]$managedSchemes[$si], $extraSchemeName, [StringComparison]::OrdinalIgnoreCase)) {
+                                        $managedSchemes.RemoveAt($si)
+                                    }
+                                }
+                                $prunedSchemeNames.Add($extraSchemeName)
+                            }
+                        }
+                    }
+                }
+
+                $referencedFiles = Get-RetainedSchemeFiles $schemesKey $managedSchemeRecords $previousCursorState $roleMap
+                foreach ($extraSz in $extraSizes) {
                     $extraSizeDir = Join-Path $themeRoot "$themeName-$extraSz-Windows"
                     $extraDirNorm = Normalize-BibataPath $extraSizeDir
                     $extraPrefix = $extraDirNorm + "\"
@@ -914,6 +1039,7 @@ try {
                     foreach ($mf in @($managedCursorFiles)) {
                         $normMf = Normalize-BibataPath ([string]$mf)
                         if (-not $normMf.StartsWith($extraPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                        if ($referencedFiles.Contains($normMf)) { continue }
                         if (Test-Path -LiteralPath $mf -PathType Leaf) {
                             if (-not $createdCursorNormSet.Contains($normMf) -and -not $backedUpCursorNormSet.Contains($normMf)) {
                                 if ([string]::IsNullOrWhiteSpace($cursorBackupDir)) {
@@ -990,7 +1116,16 @@ try {
                 }
             }
             else {
-                $managedSchemeRecords[$schemeName].writtenValue = $schemeValueStr
+                $existingRec = $managedSchemeRecords[$schemeName]
+                $stillMatchesOurs = $schemeSnapBefore.valExisted -and
+                    [string]::Equals([string]$schemeSnapBefore.value, [string]$existingRec.writtenValue, [StringComparison]::OrdinalIgnoreCase)
+                if (-not $stillMatchesOurs) {
+                    $inheritedSchemeSnap = Resolve-InheritedSchemeSnapshot $schemeName $schemeSnapBefore $InstallDir
+                    $existingRec.existedBefore = [bool]$inheritedSchemeSnap.valExisted
+                    $existingRec.previousValue = $inheritedSchemeSnap.value
+                    $existingRec.previousKind = if ([string]::IsNullOrWhiteSpace([string]$inheritedSchemeSnap.kind)) { "String" } else { [string]$inheritedSchemeSnap.kind }
+                }
+                $existingRec.writtenValue = $schemeValueStr
             }
 
             Write-Host "Applied cursor scheme: $schemeName" -ForegroundColor Green
@@ -1001,9 +1136,9 @@ try {
                 New-Item -ItemType Directory -Path $trailDir -Force | Out-Null
             }
 
-            if ($exeExistedBefore) { [System.IO.File]::Copy($destExe, $exeBak, $true) }
-            if ($csExistedBefore) { [System.IO.File]::Copy($destCs, $csBak, $true) }
-            if ($cfgExistedBefore) { [System.IO.File]::Copy($cfgPath, $cfgBak, $true) }
+            if ($exeExistedBefore) { Write-FileFreshInode $destExe $exeBak }
+            if ($csExistedBefore) { Write-FileFreshInode $destCs $csBak }
+            if ($cfgExistedBefore) { Write-FileFreshInode $cfgPath $cfgBak }
 
             if ($wasRunning) {
                 foreach ($rp in $runningProcs) {
@@ -1017,6 +1152,13 @@ try {
             Copy-Item -LiteralPath $stagedExe -Destination $destExe -Force
 
             if (-not [string]::IsNullOrWhiteSpace($Palette)) {
+                if (-not $ownsConfig -and
+                    (-not $userConfigBackup -or (Get-FileSha256 $cfgBak) -ne $userConfigBackup.writtenHash)) {
+                    $userConfigBackup = [ordered]@{
+                        originalBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgBak))
+                        writtenHash   = $null
+                    }
+                }
                 $paletteMap = @{
                     Ice      = "0"
                     Cyan     = "1"
@@ -1047,6 +1189,7 @@ try {
                 else {
                     Set-Content -LiteralPath $cfgPath -Value @("[BibataIceTrail]", "Palette=$pVal") -Encoding UTF8
                 }
+                if ($userConfigBackup) { $userConfigBackup.writtenHash = Get-FileSha256 $cfgPath }
                 Write-Host "Configured palette: $Palette (Palette=$pVal)" -ForegroundColor Green
             }
 
@@ -1067,13 +1210,19 @@ try {
 
             $managedTrail = $true
             $prevTrailExePath = $destExe
+            Add-UniquePath $managedTrailFiles $destExe
+            Add-UniquePath $managedTrailFiles $destCs
+            # The running app can create config.ini after a -NoLaunch install.
+            if ($ownsConfig) { Add-UniquePath $managedTrailFiles $cfgPath }
         }
 
         $manifestObj = [ordered]@{
-            schemaVersion        = 2
+            schemaVersion        = 3
             installDir           = $InstallDir
             managedTrail         = $managedTrail
             trailExePath         = $prevTrailExePath
+            managedTrailFiles    = @($managedTrailFiles)
+            userConfigBackup     = $userConfigBackup
             autoStartManaged     = $autoStartManaged
             managedCursor        = $managedCursor
             managedThemeDirs     = @($managedThemeDirs)
@@ -1084,8 +1233,24 @@ try {
             previousCursorState  = $previousCursorState
             updatedAt            = (Get-Date).ToString("o")
         }
-        $manifestJson = $manifestObj | ConvertTo-Json -Depth 6
-        Set-Content -LiteralPath $manifestPath -Value $manifestJson -Encoding UTF8
+        Write-BibataJson $manifestPath $manifestObj
+
+        if (-not $SkipCursor) {
+            $rtFile = Join-Path $InstallDir "bibata-runtime-schemes.json"
+            if (Test-Path -LiteralPath $rtFile -PathType Leaf) {
+                try {
+                    $runtime = Read-BibataRuntimeSchemes $rtFile
+                    if ($runtime.NeedsRepair -or $prunedSchemeNames.Count -gt 0) {
+                        $kept = @($runtime.Records | Where-Object { $prunedSchemeNames -notcontains $_.name })
+                        if ($kept.Count -eq 0) { Remove-Item -LiteralPath $rtFile -Force }
+                        else { Write-BibataJson $rtFile $kept }
+                    }
+                }
+                catch {
+                    Write-Warning "Could not update cursor scheme backup '$rtFile': $($_.Exception.Message)"
+                }
+            }
+        }
 
         if (-not $SkipTrail) {
             if (Test-Path -LiteralPath $exeBak) { Remove-Item -LiteralPath $exeBak -Force -ErrorAction SilentlyContinue }
@@ -1154,12 +1319,20 @@ try {
                 try {
                     Restore-CursorState $cursorsKey $cursorsStateBeforeThisRun
                     Restore-RegValue $schemesKey $schemeName $schemeSnapBefore
+                    foreach ($pr in $prunedSchemeRollbacks) {
+                        Restore-RegValue $schemesKey $pr.Name $pr.Snapshot
+                    }
                     if (-not $SkipCursorRefresh) {
                         Refresh-WindowsCursors
                     }
                 }
                 catch {
                     Write-Warning "Failed to rollback cursor registry state: $($_.Exception.Message)"
+                }
+            }
+            elseif ($prunedSchemeRollbacks.Count -gt 0) {
+                foreach ($pr in $prunedSchemeRollbacks) {
+                    try { Restore-RegValue $schemesKey $pr.Name $pr.Snapshot } catch {}
                 }
             }
 

@@ -107,7 +107,7 @@ if ($realRunKey) {
 $lockProc = $null
 try {
     # PowerShell syntax validation
-    foreach ($psFile in @($installPs1, $uninstallPs1)) {
+    foreach ($psFile in @($installPs1, $uninstallPs1, (Join-Path $repoRoot 'src\InstallState.ps1'))) {
         $tokens = $null
         $errors = $null
         [System.Management.Automation.Language.Parser]::ParseFile($psFile, [ref]$tokens, [ref]$errors) | Out-Null
@@ -214,6 +214,8 @@ try {
 
     $exe3HashBefore = Get-FileSha256 $exe3
     $cfg3HashBefore = Get-FileSha256 $cfg3
+    [IO.File]::WriteAllText("$cfg3.bak", "user backup from before the upgrade")
+    $cfg3BackupHash = Get-FileSha256 "$cfg3.bak"
     $pids3Before = @(Get-BibataPidsByPath $exe3)
     Assert-True ($pids3Before.Count -eq 1) "Case 3a: Initial instance not running"
 
@@ -240,7 +242,7 @@ class FailLaunch {
     Assert-True ((Get-FileSha256 $cfg3) -eq $cfg3HashBefore) "Case 3a: config.ini hash mismatch after rollback!"
     Assert-True ((Get-Content -LiteralPath $cfg3 -Raw) -match "Palette=0") "Case 3a: config.ini not rolled back to Palette=0!"
     Assert-True (-not (Test-Path -LiteralPath "$exe3.bak")) "Case 3a: exe.bak not cleaned after verified rollback"
-    Assert-True (-not (Test-Path -LiteralPath "$cfg3.bak")) "Case 3a: config.ini.bak not cleaned after verified rollback"
+    Assert-True ((Get-FileSha256 "$cfg3.bak") -eq $cfg3BackupHash) "Case 3a: Rollback overwrote the user's config.ini.bak"
     Assert-True ($null -eq (Get-ItemProperty -Path $run3 -Name "BibataIceTrail" -ErrorAction SilentlyContinue)) "Case 3a: Newly added Run entry not removed on rollback!"
     $pids3After = @(Get-BibataPidsByPath $exe3)
     Assert-True ($pids3After.Count -eq 1) "Case 3a: Old BibataIceTrail process not restarted after rollback!"
@@ -355,6 +357,9 @@ class FailLaunch {
     & $installPs1 -InstallDir $d7 -NoLaunch -RegistryRoot $r7 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
     Set-ItemProperty -Path $c7 -Name "(Default)" -Value "UserNewTheme" -Type String
     Set-ItemProperty -Path $c7 -Name "Arrow" -Value "C:\UserNew\new.cur" -Type String
+    foreach ($otherRole7 in @("Help", "AppStarting", "Wait", "Crosshair", "IBeam", "NWPen", "No", "SizeNS", "SizeWE", "SizeNWSE", "SizeNESW", "SizeAll", "UpArrow", "Hand", "Pin", "Person")) {
+        Set-ItemProperty -Path $c7 -Name $otherRole7 -Value "" -Type String
+    }
     & $uninstallPs1 -InstallDir $d7 -RegistryRoot $r7 -SkipCursorRefresh | Out-Null
     Assert-True ((Get-Item $c7).GetValue("Arrow", $null) -eq "C:\UserNew\new.cur") "Case 6b: User-switched cursor overwritten"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $d7 "Bibata-Modern-Ice"))) "Case 6b: Managed Bibata dir not cleaned"
@@ -365,9 +370,7 @@ class FailLaunch {
     & $installPs1 -InstallDir $d8 -SkipCursor -RegistryRoot $r8 -SkipCursorRefresh -SkipTaskScheduler -LaunchArgs "--instance-name RegCase8_$guid" | Out-Null
     $exe8 = Join-Path $d8 "Bibata-Ice-Trail\BibataIceTrail.exe"
     $hash8Before = Get-FileSha256 $exe8
-    $lockScript = "`$fs = [System.IO.File]::Open('$exe8', 'Open', 'Read', 'Read'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
-    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 350
+    $lockStream8 = [System.IO.File]::Open($exe8, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $threw8 = $false
     try {
         & $installPs1 -InstallDir $d8 -SkipCursor -RegistryRoot $r8 -SkipCursorRefresh -SkipTaskScheduler -LaunchArgs "--instance-name RegCase8_$guid" | Out-Null
@@ -375,8 +378,10 @@ class FailLaunch {
     catch {
         $threw8 = $true
     }
+    finally {
+        $lockStream8.Dispose()
+    }
     Assert-True $threw8 "Case 6c: Locked EXE replacement should throw"
-    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
     Assert-True ((Get-FileSha256 $exe8) -eq $hash8Before) "Case 6c: Locked EXE hash mismatch"
     Assert-True (-not (Test-Path -LiteralPath "$exe8.bak")) "Case 6c: exe.bak left behind"
     $pids8After = @(Get-BibataPidsByPath $exe8)
@@ -512,10 +517,7 @@ class FailLaunch {
     $regPtrHashBefore = Get-FileSha256 $regPtr11
     $regBusyHashBefore = Get-FileSha256 $regBusy11
     $manifest11 = Join-Path $d11 "bibata-ice-glow-manifest.json"
-    $lockScript11 = "`$fs = [System.IO.File]::Open('$manifest11', 'Open', 'ReadWrite', 'None'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
-    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript11 -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 350
-
+    $lockStream11 = [System.IO.File]::Open($manifest11, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $threw11 = $false
     try {
         & $installPs1 -InstallDir $d11 -Size Large -NoLaunch -RegistryRoot $r11 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $newZip9 | Out-Null
@@ -523,8 +525,10 @@ class FailLaunch {
     catch {
         $threw11 = $true
     }
+    finally {
+        $lockStream11.Dispose()
+    }
     Assert-True $threw11 "Case 9a: Locked manifest should fail upgrade"
-    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
     $c11 = Join-Path $r11 "Control Panel\Cursors"
     Assert-True ((Get-Item $c11).GetValue("", $null) -eq "Bibata-Modern-Ice (Regular)") "Case 9a: Active scheme did not roll back to Regular"
     Assert-True ((Get-FileSha256 $regPtr11) -eq $regPtrHashBefore) "Case 9a: Regular Pointer.cur was NOT rolled back to old content!"
@@ -544,10 +548,7 @@ class FailLaunch {
     Assert-True ($hlRegHashBefore -eq $hlLargeHashBefore) "Case 9b: Expected shared initial Busy.ani bytes"
 
     $manifest11b = Join-Path $d11b "bibata-ice-glow-manifest.json"
-    $lockScript11b = "`$fs = [System.IO.File]::Open('$manifest11b', 'Open', 'ReadWrite', 'None'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
-    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript11b -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 350
-
+    $lockStream11b = [System.IO.File]::Open($manifest11b, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $threw11b = $false
     try {
         & $installPs1 -InstallDir $d11b -Size Extra-Large -NoLaunch -RegistryRoot $r11b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $newZip9 | Out-Null
@@ -555,8 +556,10 @@ class FailLaunch {
     catch {
         $threw11b = $true
     }
+    finally {
+        $lockStream11b.Dispose()
+    }
     Assert-True $threw11b "Case 9b: Locked manifest should fail upgrade"
-    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
     Assert-True ((Get-FileSha256 $hlRegBusy) -eq $hlRegHashBefore) "Case 9b: Regular Busy.ani corrupted after hardlink rollback"
     Assert-True ((Get-FileSha256 $hlLargeBusy) -eq $hlLargeHashBefore) "Case 9b: Large Busy.ani corrupted after hardlink rollback"
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $d11b "Bibata-Modern-Ice\Bibata-Modern-Ice-Extra-Large-Windows"))) "Case 9b: Newly added Extra-Large folder not cleaned"
@@ -863,9 +866,7 @@ class FailLaunch {
     $xlPtrHashBefore = Get-FileSha256 (Join-Path $xlDir14 "Pointer.cur")
     $largeBusyHashBefore = Get-FileSha256 (Join-Path $largeDir14 "Busy.ani")
     $manifest14 = Join-Path $d14sz "bibata-ice-glow-manifest.json"
-    $lockScript14 = "`$fs = [System.IO.File]::Open('$manifest14', 'Open', 'ReadWrite', 'None'); Start-Sleep -Milliseconds 3000; `$fs.Close()"
-    $lockProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-Command", $lockScript14 -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 350
+    $lockStream14 = [System.IO.File]::Open($manifest14, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     $threw14d = $false
     try {
         & $installPs1 -InstallDir $d14sz -Size Regular -SingleSize -NoLaunch -RegistryRoot $r14sz -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
@@ -873,12 +874,624 @@ class FailLaunch {
     catch {
         $threw14d = $true
     }
+    finally {
+        $lockStream14.Dispose()
+    }
     Assert-True $threw14d "Case 14d: Locked manifest should fail SingleSize prune"
-    if ($lockProc -and -not $lockProc.HasExited) { $lockProc.WaitForExit(5000) | Out-Null }
     Assert-True ((Get-FileSha256 (Join-Path $xlDir14 "Pointer.cur")) -eq $xlPtrHashBefore) "Case 14d: Pruned Extra-Large Pointer.cur not rolled back!"
     Assert-True ((Get-FileSha256 (Join-Path $largeDir14 "Busy.ani")) -eq $largeBusyHashBefore) "Case 14d: Pruned Large Busy.ani not rolled back!"
     Assert-True (Test-Path -LiteralPath $privInLarge) "Case 14d: Private file lost during prune rollback!"
     Write-Host "PASS Case 14: Reinstall 3->1, 1->3, missing Help.cur repair, private file preservation, idempotency & prune rollback all pass" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 15 (PR #1): Uninstall -KeepFiles must NOT delete user's mixed scheme or revert custom Hand
+    # =========================================================================
+    $d15 = Join-Path $testRoot "case15_mixed_scheme"
+    $r15 = Join-Path $regRoot "case15"
+    $c15 = Join-Path $r15 "Control Panel\Cursors"
+    $s15 = Join-Path $c15 "Schemes"
+    New-Item -Path $s15 -Force | Out-Null
+    $customHand15 = Join-Path $testRoot "case15_my_hand.cur"
+    Set-Content -Path $customHand15 -Value "my-custom-hand" -Encoding UTF8
+    Set-ItemProperty -Path $c15 -Name "(Default)" -Value "OrigBefore15" -Type String
+    Set-ItemProperty -Path $c15 -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+
+    & $installPs1 -InstallDir $d15 -Size Regular -NoLaunch -RegistryRoot $r15 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $bibataArrow15 = Join-Path $d15 "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows\Pointer.cur"
+    $mixedSchemeVal = "$bibataArrow15,,,,,,,,,,,,,,$customHand15,,"
+    Set-ItemProperty -Path $s15 -Name "My Mixed Scheme" -Value $mixedSchemeVal -Type String
+    Set-ItemProperty -Path $c15 -Name "(Default)" -Value "My Mixed Scheme" -Type String
+    Set-ItemProperty -Path $c15 -Name "Hand" -Value $customHand15 -Type String
+
+    & $uninstallPs1 -InstallDir $d15 -KeepFiles -RegistryRoot $r15 -SkipCursorRefresh | Out-Null
+    $c15Item = Get-Item -Path $c15
+    $s15Item = Get-Item -Path $s15
+    Assert-True ($s15Item.GetValue("My Mixed Scheme", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -eq $mixedSchemeVal) "Case 15: User's 'My Mixed Scheme' was deleted or altered!"
+    Assert-True ($c15Item.GetValue("", $null) -eq "My Mixed Scheme") "Case 15: Active '(Default)' scheme was reverted!"
+    Assert-True ($c15Item.GetValue("Hand", $null) -eq $customHand15) "Case 15: Active custom Hand cursor was reverted!"
+    Assert-True ($c15Item.GetValue("Arrow", $null) -eq $bibataArrow15) "Case 15: Active Bibata Arrow was altered under -KeepFiles!"
+    Assert-True ($null -eq $s15Item.GetValue("Bibata-Modern-Ice (Regular)", $null)) "Case 15: Project's own Regular scheme was not cleaned"
+    Write-Host "PASS Case 15: Uninstall -KeepFiles preserves user's mixed scheme, active selection, and custom Hand cursor" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 16 (PR #2): Editing Large scheme mid-cycle then cycling back to Large preserves latest edit
+    # =========================================================================
+    $d16 = Join-Path $testRoot "case16_hotkey_reedit"
+    $r16 = Join-Path $regRoot "case16"
+    $c16 = Join-Path $r16 "Control Panel\Cursors"
+    $s16 = Join-Path $c16 "Schemes"
+    New-Item -Path $s16 -Force | Out-Null
+    $origLarge16 = "%SystemRoot%\cursors\aero_arrow.cur,%SystemRoot%\cursors\aero_helpsel.cur,,"
+    $editedLarge16 = "%SystemRoot%\cursors\aero_arrow.cur,%SystemRoot%\cursors\aero_link.cur,%SystemRoot%\cursors\aero_busy.ani,,"
+    Set-ItemProperty -Path $s16 -Name "Bibata-Modern-Ice (Large)" -Value $origLarge16 -Type String
+    Set-ItemProperty -Path $c16 -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+
+    & $installPs1 -InstallDir $d16 -Size Regular -NoLaunch -RegistryRoot $r16 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $exe16 = Join-Path $d16 "Bibata-Ice-Trail\BibataIceTrail.exe"
+    $subKey16 = ($c16 -replace '^HKCU:\\', '')
+
+    # Regular -> Large -> Extra-Large
+    foreach ($szStep in @("Large", "Extra-Large")) {
+        $p16 = Start-Process -FilePath $exe16 -ArgumentList @("--cycle-cursor-size", "--cursors-reg-key", "`"$subKey16`"", "--no-refresh") -Wait -PassThru
+        Assert-True ($p16.ExitCode -eq 0) "Case 16: Cycle to $szStep failed"
+    }
+    # User edits saved Large scheme with new value AND ExpandString kind
+    Set-ItemProperty -Path $s16 -Name "Bibata-Modern-Ice (Large)" -Value $editedLarge16 -Type ExpandString
+
+    # Continue cycling: Extra-Large -> Regular -> Large (and repeat once more to ensure stable)
+    foreach ($szStep in @("Regular", "Large", "Extra-Large", "Regular", "Large")) {
+        $p16 = Start-Process -FilePath $exe16 -ArgumentList @("--cycle-cursor-size", "--cursors-reg-key", "`"$subKey16`"", "--no-refresh") -Wait -PassThru
+        Assert-True ($p16.ExitCode -eq 0) "Case 16: Post-edit cycle to $szStep failed"
+    }
+
+    & $uninstallPs1 -InstallDir $d16 -RegistryRoot $r16 -SkipCursorRefresh | Out-Null
+    $s16Item = Get-Item -Path $s16
+    $restored16 = $s16Item.GetValue("Bibata-Modern-Ice (Large)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $restoredKind16 = $s16Item.GetValueKind("Bibata-Modern-Ice (Large)").ToString()
+    Assert-True ($restored16 -eq $editedLarge16) "Case 16: Latest user edit on Large was lost after cycling back to Large (got '$restored16')"
+    Assert-True ($restoredKind16 -eq "ExpandString") "Case 16: Latest user edit registry kind not restored (got '$restoredKind16')"
+    Write-Host "PASS Case 16: Cycling back to Large after editing preserves and restores latest user edit & registry kind" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 17 (PR #3): A -> B migration with hotkey cycling preserves original pre-existing Large scheme
+    # =========================================================================
+    $d17orig = Join-Path $testRoot "case17_orig"
+    New-Item -ItemType Directory -Path $d17orig -Force | Out-Null
+    $origCur17 = Join-Path $d17orig "user_large_arrow.cur"
+    Set-Content -Path $origCur17 -Value "user-large-17" -Encoding UTF8
+    $origLarge17 = "$origCur17,%SystemRoot%\cursors\aero_helpsel.cur,,"
+
+    # 17a: A (install Regular + hotkey->Large) -> B (install Regular + hotkey->Large) -> uninstall A -> uninstall B
+    $d17A = Join-Path $testRoot "case17a_dirA"
+    $d17B = Join-Path $testRoot "case17a_dirB"
+    $r17a = Join-Path $regRoot "case17a"
+    $c17a = Join-Path $r17a "Control Panel\Cursors"
+    $s17a = Join-Path $c17a "Schemes"
+    New-Item -Path $s17a -Force | Out-Null
+    Set-ItemProperty -Path $s17a -Name "Bibata-Modern-Ice (Large)" -Value $origLarge17 -Type ExpandString
+    Set-ItemProperty -Path $c17a -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+    $subKey17a = ($c17a -replace '^HKCU:\\', '')
+
+    & $installPs1 -InstallDir $d17A -Size Regular -NoLaunch -RegistryRoot $r17a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $exe17A = Join-Path $d17A "Bibata-Ice-Trail\BibataIceTrail.exe"
+    $p17A = Start-Process -FilePath $exe17A -ArgumentList @("--cycle-cursor-size", "--cursors-reg-key", "`"$subKey17a`"", "--no-refresh") -Wait -PassThru
+    Assert-True ($p17A.ExitCode -eq 0) "Case 17a: A hotkey cycle to Large failed"
+
+    & $installPs1 -InstallDir $d17B -Size Regular -NoLaunch -RegistryRoot $r17a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $exe17B = Join-Path $d17B "Bibata-Ice-Trail\BibataIceTrail.exe"
+    $p17B = Start-Process -FilePath $exe17B -ArgumentList @("--cycle-cursor-size", "--cursors-reg-key", "`"$subKey17a`"", "--no-refresh") -Wait -PassThru
+    Assert-True ($p17B.ExitCode -eq 0) "Case 17a: B hotkey cycle to Large failed"
+
+    & $uninstallPs1 -InstallDir $d17A -RegistryRoot $r17a -SkipCursorRefresh | Out-Null
+    $bLargeAfterA = (Get-Item -Path $s17a).GetValue("Bibata-Modern-Ice (Large)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    Assert-True ($bLargeAfterA -like "*case17a_dirB*Bibata-Modern-Ice-Large-Windows\Pointer.cur*") "Case 17a: Uninstalling A broke B's Large scheme ($bLargeAfterA)"
+
+    & $uninstallPs1 -InstallDir $d17B -RegistryRoot $r17a -SkipCursorRefresh | Out-Null
+    $s17aItem = Get-Item -Path $s17a
+    $restored17a = $s17aItem.GetValue("Bibata-Modern-Ice (Large)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $restoredKind17a = $s17aItem.GetValueKind("Bibata-Modern-Ice (Large)").ToString()
+    Assert-True ($restored17a -eq $origLarge17) "Case 17a: Original Large scheme lost after A->B hotkey migration (got '$restored17a')"
+    Assert-True ($restoredKind17a -eq "ExpandString") "Case 17a: Original Large scheme kind mismatch ($restoredKind17a)"
+
+    # 17b: A installs -Size Large directly -> B installs Regular then hotkey->Large -> uninstall A -> uninstall B
+    $d17bA = Join-Path $testRoot "case17b_dirA"
+    $d17bB = Join-Path $testRoot "case17b_dirB"
+    $r17b = Join-Path $regRoot "case17b"
+    $c17b = Join-Path $r17b "Control Panel\Cursors"
+    $s17b = Join-Path $c17b "Schemes"
+    New-Item -Path $s17b -Force | Out-Null
+    Set-ItemProperty -Path $s17b -Name "Bibata-Modern-Ice (Large)" -Value $origLarge17 -Type ExpandString
+    Set-ItemProperty -Path $c17b -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+    $subKey17b = ($c17b -replace '^HKCU:\\', '')
+
+    & $installPs1 -InstallDir $d17bA -Size Large -NoLaunch -RegistryRoot $r17b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    & $installPs1 -InstallDir $d17bB -Size Regular -NoLaunch -RegistryRoot $r17b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $exe17bB = Join-Path $d17bB "Bibata-Ice-Trail\BibataIceTrail.exe"
+    $p17bB = Start-Process -FilePath $exe17bB -ArgumentList @("--cycle-cursor-size", "--cursors-reg-key", "`"$subKey17b`"", "--no-refresh") -Wait -PassThru
+    Assert-True ($p17bB.ExitCode -eq 0) "Case 17b: B hotkey cycle to Large failed"
+    & $uninstallPs1 -InstallDir $d17bA -RegistryRoot $r17b -SkipCursorRefresh | Out-Null
+    & $uninstallPs1 -InstallDir $d17bB -RegistryRoot $r17b -SkipCursorRefresh | Out-Null
+    $restored17b = (Get-Item -Path $s17b).GetValue("Bibata-Modern-Ice (Large)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    Assert-True ($restored17b -eq $origLarge17) "Case 17b: Original Large scheme lost after A(install Large)->B(hotkey Large) (got '$restored17b')"
+    Write-Host "PASS Case 17: A->B migration with size hotkey cycling inherits and restores original Large scheme" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 18 (PR #4): -SingleSize reinstall syncs Schemes for pruned sizes (delete / restore / keep user edit)
+    # =========================================================================
+    # 18a: Project-created Large scheme -> reinstall Regular -SingleSize -> Large scheme removed
+    $d18a = Join-Path $testRoot "case18a_prune_delete"
+    $r18a = Join-Path $regRoot "case18a"
+    $s18a = Join-Path $r18a "Control Panel\Cursors\Schemes"
+    New-Item -Path $s18a -Force | Out-Null
+    & $installPs1 -InstallDir $d18a -Size Large -NoLaunch -RegistryRoot $r18a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True ($null -ne (Get-Item -Path $s18a).GetValue("Bibata-Modern-Ice (Large)", $null)) "Case 18a: Large scheme not created"
+    & $installPs1 -InstallDir $d18a -Size Regular -SingleSize -NoLaunch -RegistryRoot $r18a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d18a "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows\Pointer.cur"))) "Case 18a: Large files not pruned"
+    Assert-True ($null -eq (Get-Item -Path $s18a).GetValue("Bibata-Modern-Ice (Large)", $null)) "Case 18a: Stale Large scheme left pointing to deleted files!"
+
+    # 18b: Pre-existing custom Large scheme -> install Large -> reinstall Regular -SingleSize -> restored to original value & kind
+    $d18b = Join-Path $testRoot "case18b_prune_restore"
+    $r18b = Join-Path $regRoot "case18b"
+    $s18b = Join-Path $r18b "Control Panel\Cursors\Schemes"
+    New-Item -Path $s18b -Force | Out-Null
+    $origLarge18b = "%SystemRoot%\cursors\aero_arrow.cur,%SystemRoot%\cursors\aero_helpsel.cur,,"
+    Set-ItemProperty -Path $s18b -Name "Bibata-Modern-Ice (Large)" -Value $origLarge18b -Type ExpandString
+    & $installPs1 -InstallDir $d18b -Size Large -NoLaunch -RegistryRoot $r18b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    & $installPs1 -InstallDir $d18b -Size Regular -SingleSize -NoLaunch -RegistryRoot $r18b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $s18bItem = Get-Item -Path $s18b
+    Assert-True ($s18bItem.GetValue("Bibata-Modern-Ice (Large)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -eq $origLarge18b) "Case 18b: Taken-over Large scheme not restored on SingleSize prune"
+    Assert-True ($s18bItem.GetValueKind("Bibata-Modern-Ice (Large)").ToString() -eq "ExpandString") "Case 18b: Restored Large scheme kind mismatch"
+
+    # 18c: User manually edited Large scheme after install -> reinstall Regular -SingleSize -> keeps user edit
+    $d18c = Join-Path $testRoot "case18c_prune_keep_edit"
+    $r18c = Join-Path $regRoot "case18c"
+    $s18c = Join-Path $r18c "Control Panel\Cursors\Schemes"
+    New-Item -Path $s18c -Force | Out-Null
+    & $installPs1 -InstallDir $d18c -Size Large -NoLaunch -RegistryRoot $r18c -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $editedLarge18c = "%SystemRoot%\cursors\aero_arrow.cur,%SystemRoot%\cursors\aero_link.cur,,"
+    Set-ItemProperty -Path $s18c -Name "Bibata-Modern-Ice (Large)" -Value $editedLarge18c -Type String
+    & $installPs1 -InstallDir $d18c -Size Regular -SingleSize -NoLaunch -RegistryRoot $r18c -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    Assert-True ((Get-Item -Path $s18c).GetValue("Bibata-Modern-Ice (Large)", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -eq $editedLarge18c) "Case 18c: User-edited Large scheme lost on SingleSize prune"
+    Write-Host "PASS Case 18: -SingleSize reinstall deletes project-created, restores pre-existing, and preserves user-edited pruned schemes" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 19 (PR #5): Locked Help.cur makes uninstall fail non-zero, keep retry manifest, and succeed on retry
+    # =========================================================================
+    $d19 = Join-Path $testRoot "case19_locked_uninstall"
+    $r19 = Join-Path $regRoot "case19"
+    New-Item -Path (Join-Path $r19 "Control Panel\Cursors\Schemes") -Force | Out-Null
+    & $installPs1 -InstallDir $d19 -Size Regular -SingleSize -NoLaunch -RegistryRoot $r19 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $help19 = Join-Path $d19 "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows\Help.cur"
+    $priv19 = Join-Path $d19 "Bibata-Modern-Ice\user-private-19.txt"
+    Set-Content -Path $priv19 -Value "keep-on-retry" -Encoding UTF8
+    $manifest19 = Join-Path $d19 "bibata-ice-glow-manifest.json"
+
+    # Hold read-only non-delete handle on Help.cur
+    $uninstOut19 = Join-Path $testRoot "case19_uninst_out.txt"
+    $uninstErr19 = Join-Path $testRoot "case19_uninst_err.txt"
+    $lockStream19 = [System.IO.File]::Open($help19, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    try {
+        $uProc1 = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$uninstallPs1`"", "-InstallDir", "`"$d19`"", "-RegistryRoot", "`"$r19`"", "-SkipCursorRefresh") -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $uninstOut19 -RedirectStandardError $uninstErr19
+    }
+    finally {
+        $lockStream19.Dispose()
+    }
+
+    $combined19 = ""
+    if (Test-Path $uninstOut19) { $combined19 += (Get-Content $uninstOut19 -Raw) }
+    if (Test-Path $uninstErr19) { $combined19 += "`n" + (Get-Content $uninstErr19 -Raw) }
+    $combined19Flat = ($combined19 -replace '[\r\n]+', '')
+    Assert-True ($uProc1.ExitCode -ne 0) "Case 19: Uninstall with locked Help.cur returned exit code 0!"
+    Assert-True ($combined19Flat -like "*Help.cur*") "Case 19: Uninstall error output did not identify failed file Help.cur. Output: $combined19"
+    Assert-True (Test-Path -LiteralPath $help19 -PathType Leaf) "Case 19: Locked Help.cur unexpectedly vanished"
+    Assert-True (Test-Path -LiteralPath $manifest19 -PathType Leaf) "Case 19: Manifest was deleted despite failed deletion of Help.cur!"
+    Assert-True (Test-Path -LiteralPath $priv19 -PathType Leaf) "Case 19: Private file deleted on first pass"
+
+    # Now handle is released; retry uninstall -> must clean Help.cur, empty Regular dir, and manifest, while preserving priv19
+    $uProc2 = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$uninstallPs1`"", "-InstallDir", "`"$d19`"", "-RegistryRoot", "`"$r19`"", "-SkipCursorRefresh") -Wait -PassThru -WindowStyle Hidden
+    Assert-True ($uProc2.ExitCode -eq 0) "Case 19: Retry uninstall after handle release failed (exit $($uProc2.ExitCode))"
+    Assert-True (-not (Test-Path -LiteralPath $help19)) "Case 19: Retry uninstall did not remove Help.cur!"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d19 "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows"))) "Case 19: Retry uninstall did not remove empty Regular dir"
+    Assert-True (-not (Test-Path -LiteralPath $manifest19)) "Case 19: Retry uninstall did not remove manifest"
+    Assert-True (Test-Path -LiteralPath $priv19 -PathType Leaf) "Case 19: Private file deleted on retry uninstall!"
+    Write-Host "PASS Case 19: Locked file causes non-zero uninstall exit, retains manifest, and retry cleans cleanly while preserving private files" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 20 (PR #6): Normal uninstall (without -KeepFiles) preserves cursor files referenced by retained mixed schemes
+    # =========================================================================
+    # 20a: Mixed scheme is currently active
+    $d20a = Join-Path $testRoot "case20a_mixed_active"
+    $r20a = Join-Path $regRoot "case20a"
+    $c20a = Join-Path $r20a "Control Panel\Cursors"
+    $s20a = Join-Path $c20a "Schemes"
+    New-Item -Path $s20a -Force | Out-Null
+    $customHand20a = Join-Path $testRoot "case20a_custom_hand.cur"
+    Set-Content -Path $customHand20a -Value "custom-hand-20a" -Encoding UTF8
+    Set-ItemProperty -Path $c20a -Name "(Default)" -Value "OrigBefore20a" -Type String
+    Set-ItemProperty -Path $c20a -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+
+    & $installPs1 -InstallDir $d20a -Size Regular -NoLaunch -RegistryRoot $r20a -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $regDir20a = Join-Path $d20a "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows"
+    $largeDir20a = Join-Path $d20a "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows"
+    $xlDir20a = Join-Path $d20a "Bibata-Modern-Ice\Bibata-Modern-Ice-Extra-Large-Windows"
+    $bibataArrow20a = Join-Path $regDir20a "Pointer.cur"
+    $bibataHelp20a = Join-Path $regDir20a "Help.cur"
+    $bibataLink20a = Join-Path $regDir20a "Link.cur"
+    $arrowHash20a = Get-FileSha256 $bibataArrow20a
+
+    # Keep Bibata Arrow, replace Hand with custom .cur, clear other Bibata roles, save & activate "My Mixed Scheme"
+    $mixedVal20a = "$bibataArrow20a,,,,,,,,,,,,,,$customHand20a,,"
+    Set-ItemProperty -Path $s20a -Name "My Mixed Scheme" -Value $mixedVal20a -Type String
+    Set-ItemProperty -Path $c20a -Name "(Default)" -Value "My Mixed Scheme" -Type String
+    Set-ItemProperty -Path $c20a -Name "Arrow" -Value $bibataArrow20a -Type String
+    Set-ItemProperty -Path $c20a -Name "Hand" -Value $customHand20a -Type String
+    foreach ($clearRole in @("Help", "AppStarting", "Wait", "Crosshair", "IBeam", "NWPen", "No", "SizeNS", "SizeWE", "SizeNWSE", "SizeNESW", "SizeAll", "UpArrow", "Pin", "Person")) {
+        Set-ItemProperty -Path $c20a -Name $clearRole -Value "" -Type String
+    }
+
+    & $uninstallPs1 -InstallDir $d20a -RegistryRoot $r20a -SkipCursorRefresh | Out-Null
+    $c20aItem = Get-Item -Path $c20a
+    $s20aItem = Get-Item -Path $s20a
+    Assert-True ($c20aItem.GetValue("", $null) -eq "My Mixed Scheme") "Case 20a: Active '(Default)' mixed scheme was altered"
+    Assert-True ($c20aItem.GetValue("Hand", $null) -eq $customHand20a) "Case 20a: Active custom Hand was altered"
+    Assert-True ($c20aItem.GetValue("Arrow", $null) -eq $bibataArrow20a) "Case 20a: Active mixed Arrow path was altered"
+    Assert-True ($s20aItem.GetValue("My Mixed Scheme", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -eq $mixedVal20a) "Case 20a: Saved 'My Mixed Scheme' was altered or deleted"
+    Assert-True (Test-Path -LiteralPath $bibataArrow20a -PathType Leaf) "Case 20a: Referenced Pointer.cur was deleted by normal uninstall!"
+    Assert-True ((Get-FileSha256 $bibataArrow20a) -eq $arrowHash20a) "Case 20a: Referenced Pointer.cur content changed!"
+    Assert-True (Test-Path -LiteralPath $customHand20a -PathType Leaf) "Case 20a: Custom Hand file missing"
+    Assert-True (-not (Test-Path -LiteralPath $bibataHelp20a)) "Case 20a: Unreferenced Regular\Help.cur was not cleaned up"
+    Assert-True (-not (Test-Path -LiteralPath $bibataLink20a)) "Case 20a: Unreferenced Regular\Link.cur was not cleaned up"
+    Assert-True (-not (Test-Path -LiteralPath $largeDir20a)) "Case 20a: Unreferenced Large directory was not cleaned up"
+    Assert-True (-not (Test-Path -LiteralPath $xlDir20a)) "Case 20a: Unreferenced Extra-Large directory was not cleaned up"
+    Assert-True ($null -eq $s20aItem.GetValue("Bibata-Modern-Ice (Regular)", $null)) "Case 20a: Project Regular scheme was not removed"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d20a "Bibata-Ice-Trail\BibataIceTrail.exe"))) "Case 20a: BibataIceTrail.exe was not cleaned up"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d20a "bibata-ice-glow-manifest.json"))) "Case 20a: Manifest was not cleaned up after successful uninstall"
+
+    # 20b: Mixed scheme is saved, but user switched active cursors to another custom scheme before normal uninstall
+    $d20b = Join-Path $testRoot "case20b_mixed_inactive_custom"
+    $r20b = Join-Path $regRoot "case20b"
+    $c20b = Join-Path $r20b "Control Panel\Cursors"
+    $s20b = Join-Path $c20b "Schemes"
+    New-Item -Path $s20b -Force | Out-Null
+    $customHand20b = Join-Path $testRoot "case20b_custom_hand.cur"
+    $otherArrow20b = Join-Path $testRoot "case20b_other_arrow.cur"
+    Set-Content -Path $customHand20b -Value "custom-hand-20b" -Encoding UTF8
+    Set-Content -Path $otherArrow20b -Value "other-arrow-20b" -Encoding UTF8
+    Set-ItemProperty -Path $c20b -Name "(Default)" -Value "OrigBefore20b" -Type String
+    Set-ItemProperty -Path $c20b -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
+
+    & $installPs1 -InstallDir $d20b -Size Regular -NoLaunch -RegistryRoot $r20b -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $regDir20b = Join-Path $d20b "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows"
+    $bibataArrow20b = Join-Path $regDir20b "Pointer.cur"
+    $bibataHelp20b = Join-Path $regDir20b "Help.cur"
+    $mixedVal20b = "$bibataArrow20b,,,,,,,,,,,,,,$customHand20b,,"
+    $otherVal20b = "$otherArrow20b,,,,,,,,,,,,,,,,"
+    Set-ItemProperty -Path $s20b -Name "My Mixed Scheme" -Value $mixedVal20b -Type String
+    Set-ItemProperty -Path $s20b -Name "Other Custom Scheme" -Value $otherVal20b -Type String
+    # User switches active scheme to "Other Custom Scheme"
+    Set-ItemProperty -Path $c20b -Name "(Default)" -Value "Other Custom Scheme" -Type String
+    Set-ItemProperty -Path $c20b -Name "Arrow" -Value $otherArrow20b -Type String
+    foreach ($clearRole in @("Help", "AppStarting", "Wait", "Crosshair", "IBeam", "NWPen", "No", "SizeNS", "SizeWE", "SizeNWSE", "SizeNESW", "SizeAll", "UpArrow", "Hand", "Pin", "Person")) {
+        Set-ItemProperty -Path $c20b -Name $clearRole -Value "" -Type String
+    }
+
+    & $uninstallPs1 -InstallDir $d20b -RegistryRoot $r20b -SkipCursorRefresh | Out-Null
+    $c20bItem = Get-Item -Path $c20b
+    $s20bItem = Get-Item -Path $s20b
+    Assert-True ($c20bItem.GetValue("", $null) -eq "Other Custom Scheme") "Case 20b: Active 'Other Custom Scheme' was altered"
+    Assert-True ($c20bItem.GetValue("Arrow", $null) -eq $otherArrow20b) "Case 20b: Active other Arrow was altered"
+    Assert-True ($s20bItem.GetValue("My Mixed Scheme", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -eq $mixedVal20b) "Case 20b: Saved inactive 'My Mixed Scheme' was altered or deleted"
+    Assert-True (Test-Path -LiteralPath $bibataArrow20b -PathType Leaf) "Case 20b: Pointer.cur referenced by saved inactive 'My Mixed Scheme' was deleted!"
+    Assert-True (-not (Test-Path -LiteralPath $bibataHelp20b)) "Case 20b: Unreferenced Regular\Help.cur was not cleaned up"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d20b "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows"))) "Case 20b: Unreferenced Large dir was not cleaned up"
+    Assert-True ($null -eq $s20bItem.GetValue("Bibata-Modern-Ice (Regular)", $null)) "Case 20b: Project Regular scheme was not removed"
+
+    # 20c: Mixed scheme is saved, and active scheme is Bibata Regular (restored on uninstall)
+    $d20c = Join-Path $testRoot "case20c_mixed_inactive_bibata_active"
+    $r20c = Join-Path $regRoot "case20c"
+    $c20c = Join-Path $r20c "Control Panel\Cursors"
+    $s20c = Join-Path $c20c "Schemes"
+    New-Item -Path $s20c -Force | Out-Null
+    $baseArrow20c = Join-Path $testRoot "case20c_base_arrow.cur"
+    $customHand20c = Join-Path $testRoot "case20c_custom_hand.cur"
+    Set-Content -Path $baseArrow20c -Value "base-arrow-20c" -Encoding UTF8
+    Set-Content -Path $customHand20c -Value "custom-hand-20c" -Encoding UTF8
+    Set-ItemProperty -Path $c20c -Name "(Default)" -Value "BaseScheme20c" -Type String
+    Set-ItemProperty -Path $c20c -Name "Arrow" -Value $baseArrow20c -Type String
+
+    & $installPs1 -InstallDir $d20c -Size Regular -NoLaunch -RegistryRoot $r20c -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $regDir20c = Join-Path $d20c "Bibata-Modern-Ice\Bibata-Modern-Ice-Regular-Windows"
+    $bibataArrow20c = Join-Path $regDir20c "Pointer.cur"
+    $bibataHelp20c = Join-Path $regDir20c "Help.cur"
+    $mixedVal20c = "$bibataArrow20c,,,,,,,,,,,,,,$customHand20c,,"
+    Set-ItemProperty -Path $s20c -Name "My Mixed Scheme" -Value $mixedVal20c -Type String
+
+    & $uninstallPs1 -InstallDir $d20c -RegistryRoot $r20c -SkipCursorRefresh | Out-Null
+    $c20cItem = Get-Item -Path $c20c
+    $s20cItem = Get-Item -Path $s20c
+    Assert-True ($c20cItem.GetValue("", $null) -eq "BaseScheme20c") "Case 20c: Active Bibata scheme should restore to BaseScheme20c"
+    Assert-True ($c20cItem.GetValue("Arrow", $null) -eq $baseArrow20c) "Case 20c: Active Arrow should restore to BaseScheme20c arrow"
+    Assert-True ($s20cItem.GetValue("My Mixed Scheme", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -eq $mixedVal20c) "Case 20c: Saved 'My Mixed Scheme' was altered or deleted"
+    Assert-True (Test-Path -LiteralPath $bibataArrow20c -PathType Leaf) "Case 20c: Pointer.cur referenced by saved 'My Mixed Scheme' was deleted!"
+    Assert-True (-not (Test-Path -LiteralPath $bibataHelp20c)) "Case 20c: Unreferenced Regular\Help.cur was not cleaned up"
+    Assert-True ($null -eq $s20cItem.GetValue("Bibata-Modern-Ice (Regular)", $null)) "Case 20c: Project Regular scheme was not removed"
+    Write-Host "PASS Case 20: Normal uninstall preserves cursor files referenced by active or saved mixed schemes while cleaning unused files" -ForegroundColor Green
+
+    # =========================================================================
+    # Case 21 (PR #7): Normal uninstall preserves user files in Bibata-Ice-Trail root and subdirectories
+    # =========================================================================
+    $d21 = Join-Path $testRoot "case21_trail_user_files"
+    $r21 = Join-Path $regRoot "case21"
+    New-Item -Path (Join-Path $r21 "Control Panel\Cursors\Schemes") -Force | Out-Null
+
+    & $installPs1 -InstallDir $d21 -Size Regular -SingleSize -Palette Cyan -NoLaunch -RegistryRoot $r21 -SkipCursorRefresh -SkipTaskScheduler -TestCursorZipPath $fixtureZip | Out-Null
+    $trailDir21 = Join-Path $d21 "Bibata-Ice-Trail"
+    $rootBackup21 = Join-Path $trailDir21 "my-palette-backup.ini"
+    $subBackupDir21 = Join-Path $trailDir21 "backups\custom"
+    New-Item -ItemType Directory -Path $subBackupDir21 -Force | Out-Null
+    $subBackup21 = Join-Path $subBackupDir21 "nested-backup.ini"
+    $rootBackupContent21 = "[UserPaletteBackup]`r`nPalette=3`r`nCustomColor=#11AAFF`r`n"
+    $subBackupContent21 = "[NestedBackup]`r`nPreset=2`r`nNote=do-not-delete-on-uninstall`r`n"
+    [System.IO.File]::WriteAllText($rootBackup21, $rootBackupContent21, [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($subBackup21, $subBackupContent21, [System.Text.Encoding]::UTF8)
+    $rootHash21 = Get-FileSha256 $rootBackup21
+    $subHash21 = Get-FileSha256 $subBackup21
+    $configBackup21 = Join-Path $trailDir21 "config.ini.bak"
+    [IO.File]::WriteAllText($configBackup21, "personal backup, different from the live configuration")
+    $configBackupHash21 = Get-FileSha256 $configBackup21
+    & $installPs1 -InstallDir $d21 -SkipCursor -Palette Rainbow -NoLaunch -RegistryRoot $r21 -SkipCursorRefresh -SkipTaskScheduler | Out-Null
+    Assert-True ((Get-FileSha256 $configBackup21) -eq $configBackupHash21) "Case 21: Reinstall changed config.ini.bak"
+
+    & $uninstallPs1 -InstallDir $d21 -RegistryRoot $r21 -SkipCursorRefresh | Out-Null
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "BibataIceTrail.exe"))) "Case 21: BibataIceTrail.exe was not removed!"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "BibataIceTrail.cs"))) "Case 21: BibataIceTrail.cs was not removed!"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $trailDir21 "config.ini"))) "Case 21: config.ini was not removed!"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $d21 "bibata-ice-glow-manifest.json"))) "Case 21: Manifest was not removed!"
+    Assert-True (Test-Path -LiteralPath $rootBackup21 -PathType Leaf) "Case 21: Root user file my-palette-backup.ini was deleted by uninstall!"
+    Assert-True (Test-Path -LiteralPath $subBackup21 -PathType Leaf) "Case 21: Subdirectory user file backups\custom\nested-backup.ini was deleted by uninstall!"
+    Assert-True ((Get-FileSha256 $rootBackup21) -eq $rootHash21) "Case 21: my-palette-backup.ini content changed!"
+    Assert-True (([System.IO.File]::ReadAllText($rootBackup21, [System.Text.Encoding]::UTF8)) -eq $rootBackupContent21) "Case 21: my-palette-backup.ini text mismatch!"
+    Assert-True ((Get-FileSha256 $subBackup21) -eq $subHash21) "Case 21: nested-backup.ini content changed!"
+    Assert-True ((Get-FileSha256 $configBackup21) -eq $configBackupHash21) "Case 21: Uninstall changed config.ini.bak"
+    Assert-True (([System.IO.File]::ReadAllText($subBackup21, [System.Text.Encoding]::UTF8)) -eq $subBackupContent21) "Case 21: nested-backup.ini text mismatch!"
+    Write-Host "PASS Case 21: Normal uninstall cleans project trail files while preserving user root & nested files in Bibata-Ice-Trail" -ForegroundColor Green
+
+    # Case 22: prune only unreferenced files, even when both saved schemes are inactive.
+    $d22 = Join-Path $testRoot "case22_prune_references"
+    $r22 = Join-Path $regRoot "case22"
+    $s22 = Join-Path $r22 "Control Panel\Cursors\Schemes"
+    $install22 = @{ InstallDir = $d22; RegistryRoot = $r22; SkipTrail = $true; SkipCursorRefresh = $true; TestCursorZipPath = $fixtureZip }
+    & $installPs1 @install22 -Size Large | Out-Null
+    $largeDir22 = Join-Path $d22 "Bibata-Modern-Ice\Bibata-Modern-Ice-Large-Windows"
+    $largeArrow22 = Join-Path $largeDir22 "Pointer.cur"
+    $largeHash22 = Get-FileSha256 $largeArrow22
+    $xlDir22 = Join-Path $d22 "Bibata-Modern-Ice\Bibata-Modern-Ice-Extra-Large-Windows"
+    $xlHelp22 = Join-Path $xlDir22 "Help.cur"
+    $xlHash22 = Get-FileSha256 $xlHelp22
+    $mixed22 = "$largeArrow22,$xlHelp22"
+    Set-ItemProperty -Path $s22 -Name "My mixed sizes" -Value $mixed22 -Type String
+    $expanded22 = $largeArrow22.Replace($env:TEMP, "%TEMP%")
+    Set-ItemProperty -Path $s22 -Name "My other arrow" -Value $expanded22 -Type ExpandString
+
+    & $installPs1 @install22 -Size Regular -SingleSize | Out-Null
+    Assert-True ((Get-Item $s22).GetValue("My mixed sizes") -eq $mixed22) "Case 22: Saved mixed scheme changed"
+    Assert-True ((Get-FileSha256 $largeArrow22) -eq $largeHash22) "Case 22: Saved Large arrow changed"
+    Assert-True ((Get-FileSha256 $xlHelp22) -eq $xlHash22) "Case 22: Saved Extra-Large Help changed"
+    Assert-True (-not (Test-Path (Join-Path $largeDir22 "Help.cur"))) "Case 22: Unreferenced Large Help was not pruned"
+    Remove-ItemProperty -Path $s22 -Name "My mixed sizes"
+    & $installPs1 @install22 -Size Regular -SingleSize | Out-Null
+    Assert-True ((Get-FileSha256 $largeArrow22) -eq $largeHash22) "Case 22: ExpandString reference was lost"
+    Assert-True (-not (Test-Path $xlDir22)) "Case 22: Extra-Large was kept after its last reference disappeared"
+    Remove-ItemProperty -Path $s22 -Name "My other arrow"
+    & $uninstallPs1 -InstallDir $d22 -RegistryRoot $r22 -SkipCursorRefresh | Out-Null
+    Assert-True (-not (Test-Path $largeDir22)) "Case 22: Previously retained file was missing from uninstall ownership"
+    Write-Host "PASS Case 22: SingleSize preserves saved references across sizes and cleans up after the last reference disappears" -ForegroundColor Green
+
+    # Case 23: a locked manifest must prevent the CLI from reporting a successful uninstall.
+    $d23 = Join-Path $testRoot "case23_locked_manifest"
+    $r23 = Join-Path $regRoot "case23"
+    & $installPs1 -InstallDir $d23 -RegistryRoot $r23 -SingleSize -SkipTrail -SkipCursorRefresh -TestCursorZipPath $fixtureZip | Out-Null
+    $manifest23 = Join-Path $d23 "bibata-ice-glow-manifest.json"
+    $cursorKey23 = Join-Path $r23 "Control Panel\Cursors"
+    $arrow23 = (Get-Item $cursorKey23).GetValue("Arrow")
+    $exclusive23 = [IO.File]::Open($manifest23, 'Open', 'Read', 'None')
+    try {
+        $readFailed23 = $false
+        try { & $uninstallPs1 -InstallDir $d23 -RegistryRoot $r23 -SkipCursorRefresh | Out-Null }
+        catch { $readFailed23 = $true }
+    }
+    finally { $exclusive23.Dispose() }
+    Assert-True ($readFailed23 -and (Test-Path -LiteralPath $arrow23)) "Case 23: Unreadable manifest allowed cleanup"
+    Assert-True ((Get-Item $cursorKey23).GetValue("Arrow") -eq $arrow23) "Case 23: Unreadable manifest changed active cursors"
+    $args23 = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $uninstallPs1), '-InstallDir', ('"{0}"' -f $d23), '-RegistryRoot', $r23, '-SkipCursorRefresh')
+    $out23 = Join-Path $testRoot "case23-out.txt"
+    $err23 = Join-Path $testRoot "case23-err.txt"
+    $lock23 = [IO.File]::Open($manifest23, 'Open', 'Read', 'Read')
+    try {
+        $first23 = Start-Process powershell.exe -ArgumentList $args23 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out23 -RedirectStandardError $err23
+    }
+    finally { $lock23.Dispose() }
+    Assert-True ($first23.ExitCode -ne 0) "Case 23: Locked manifest returned success"
+    Assert-True (-not ([IO.File]::ReadAllText($out23).Contains("Uninstall complete."))) "Case 23: False completion message"
+    Assert-True (([IO.File]::ReadAllText($err23) -replace '\s','') -like '*bibata-ice-glow-manifest.json*') "Case 23: Error did not name the manifest"
+    Assert-True (Test-Path -LiteralPath $manifest23 -PathType Leaf) "Case 23: Retry manifest missing"
+    $retry23 = Start-Process powershell.exe -ArgumentList $args23 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out23 -RedirectStandardError $err23
+    Assert-True ($retry23.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $manifest23)) "Case 23: Retry failed to remove released manifest"
+    Write-Host "PASS Case 23: Locked manifest returns failure and retry removes it" -ForegroundColor Green
+
+    # Case 24: a config present before the first trail installation belongs to the user.
+    foreach ($scenario in 'untouched', 'palette', 'edited', 'edited-before-upgrade', 'legacy-uninstall', 'legacy-upgrade') {
+        $d24 = Join-Path $testRoot "case24_$scenario"
+        $r24 = Join-Path $regRoot "case24_$scenario"
+        $trail24 = New-Item -ItemType Directory -Path (Join-Path $d24 'Bibata-Ice-Trail') -Force
+        $cfg24 = Join-Path $trail24.FullName 'config.ini'
+        [IO.File]::WriteAllText($cfg24, "[BibataIceTrail]$([char]10)Palette=1$([char]10)ShowTrayIcon=true")
+        $expectedHash = Get-FileSha256 $cfg24
+        $opts24 = @{ InstallDir=$d24; RegistryRoot=$r24; SkipCursor=$true; NoLaunch=$true; NoAutoStart=$true; SkipTaskScheduler=$true; SkipCursorRefresh=$true }
+        & $installPs1 @opts24 | Out-Null
+        Assert-True ((Get-FileSha256 $cfg24) -eq $expectedHash) "Case 24: Install modified the supplied configuration"
+        if ($scenario -like 'legacy-*') {
+            $manifest24 = Join-Path $d24 'bibata-ice-glow-manifest.json'
+            $legacy24 = Get-Content $manifest24 -Raw | ConvertFrom-Json
+            $legacy24.schemaVersion = 2
+            $legacy24.PSObject.Properties.Remove('userConfigBackup')
+            $legacy24.managedTrailFiles += $cfg24
+            Set-Content -LiteralPath $manifest24 -Value ($legacy24 | ConvertTo-Json -Depth 6) -Encoding UTF8
+        }
+        if ($scenario -notin 'untouched', 'legacy-uninstall') {
+            & $installPs1 @opts24 -Palette Rainbow | Out-Null
+            Assert-True ((Get-Content -LiteralPath $cfg24 -Raw) -match 'Palette=5') "Case 24: Requested palette was not applied"
+            if ($scenario -like 'edited*') {
+                [IO.File]::WriteAllText($cfg24, "[BibataIceTrail]$([char]10)Palette=4$([char]10)CustomColor=#123456")
+                $expectedHash = Get-FileSha256 $cfg24
+            }
+            if ($scenario -ne 'edited') { & $installPs1 @opts24 -Palette Frost | Out-Null }
+        }
+        & $uninstallPs1 -InstallDir $d24 -RegistryRoot $r24 -SkipCursorRefresh | Out-Null
+        Assert-True ((Get-FileSha256 $cfg24) -eq $expectedHash) "Case 24 ($scenario): User config lost or changed"
+        Assert-True (-not (Test-Path (Join-Path $trail24.FullName 'BibataIceTrail.exe'))) "Case 24: Managed EXE left behind"
+    }
+    Write-Host "PASS Case 24: Existing config and later user edits survive install, palette upgrades and uninstall"
+
+    # Case 25: an existing malformed/empty manifest must stop both entry points before mutation.
+    $d25 = Join-Path $testRoot 'case25_bad_manifest'
+    $r25 = Join-Path $regRoot 'case25'
+    $opts25 = @{ InstallDir=$d25; RegistryRoot=$r25; NoLaunch=$true; SkipCursorRefresh=$true; SkipTaskScheduler=$true; TestCursorZipPath=$fixtureZip }
+    & $installPs1 @opts25 -SingleSize | Out-Null
+    $manifest25 = Join-Path $d25 'bibata-ice-glow-manifest.json'
+    $original25 = [IO.File]::ReadAllBytes($manifest25)
+    $exe25 = Join-Path $d25 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $exeHash25 = Get-FileSha256 $exe25
+    $cur25 = Join-Path $r25 'Control Panel\Cursors'
+    $arrow25 = (Get-Item $cur25).GetValue('Arrow')
+    $run25 = Join-Path $r25 'Software\Microsoft\Windows\CurrentVersion\Run'
+    $startup25 = (Get-Item $run25).GetValue('BibataIceTrail')
+    foreach ($bad in '{"schemaVersion":', '', '{}', 'null', '[]') {
+        [IO.File]::WriteAllText($manifest25, $bad)
+        foreach ($operation in 'install', 'uninstall') {
+            $message = ''
+            try {
+                if ($operation -eq 'install') { & $installPs1 @opts25 -Size Large | Out-Null }
+                else { & $uninstallPs1 -InstallDir $d25 -RegistryRoot $r25 -SkipCursorRefresh | Out-Null }
+            }
+            catch { $message = $_.Exception.Message }
+            Assert-True ($message.Contains($manifest25)) "Case 25: $operation did not identify the invalid manifest"
+            Assert-True ([IO.File]::ReadAllText($manifest25) -ceq $bad) "Case 25: $operation overwrote the bad manifest"
+            Assert-True ((Get-FileSha256 $exe25) -eq $exeHash25 -and (Test-Path -LiteralPath $arrow25)) "Case 25: Managed files changed"
+            Assert-True ((Get-Item $cur25).GetValue('Arrow') -eq $arrow25 -and (Get-Item $run25).GetValue('BibataIceTrail') -eq $startup25) "Case 25: Registry changed"
+        }
+    }
+    [IO.File]::WriteAllBytes($manifest25, $original25)
+    & $uninstallPs1 -InstallDir $d25 -RegistryRoot $r25 -SkipCursorRefresh | Out-Null
+    Assert-True (-not (Test-Path $manifest25)) "Case 25: Valid manifest could not be used for retry"
+    Write-Host "PASS Case 25: Invalid manifest stops install and uninstall; restoring the original allows cleanup"
+
+    # Case 26: exercise the actual .NET reader/writer before and after PowerShell prunes its records.
+    $d26 = Join-Path $testRoot 'case26_cycle_resize'
+    $r26 = Join-Path $regRoot 'case26'
+    $c26 = Join-Path $r26 'Control Panel\Cursors'
+    $s26 = Join-Path $c26 'Schemes'
+    [void](New-Item -Path $s26 -Force)
+    $large26 = 'Bibata-Modern-Ice (Large)'
+    $xl26 = 'Bibata-Modern-Ice (Extra-Large)'
+    $user26 = Join-Path $testRoot 'user26.cur'
+    [IO.File]::WriteAllText($user26, 'user cursor')
+    Set-ItemProperty -Path $s26 -Name $xl26 -Value $user26 -Type ExpandString
+    $opts26 = @{ InstallDir=$d26; RegistryRoot=$r26; NoLaunch=$true; NoAutoStart=$true; SkipCursorRefresh=$true; SkipTaskScheduler=$true; TestCursorZipPath=$fixtureZip }
+    & $installPs1 @opts26 | Out-Null
+    $exe26 = Join-Path $d26 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $cycleArgs26 = @('--cycle-cursor-size', '--cursors-reg-key', ('"{0}"' -f $c26.Substring(6)), '--no-refresh')
+    $side26 = Join-Path $d26 'bibata-runtime-schemes.json'
+    foreach ($phase in 'initial', 'expanded') {
+        foreach ($name in $large26, $xl26) {
+            $process26 = Start-Process $exe26 -ArgumentList $cycleArgs26 -WindowStyle Hidden -Wait -PassThru
+            Assert-True ($process26.ExitCode -eq 0 -and (Get-Item $c26).GetValue('') -eq $name) "Case 26: $phase failed to switch to $name"
+            $saved26 = (Get-Item $s26).GetValue($name)
+            Assert-True (($saved26 -split ',')[0] -eq (Get-Item $c26).GetValue('Arrow')) "Case 26: $phase saved and active $name disagree"
+        }
+        if ($phase -eq 'initial') {
+            $records26 = Get-Content -LiteralPath $side26 -Raw | ConvertFrom-Json
+            $wrapped26 = @([ordered]@{ value=$records26; Count=2 })
+            [IO.File]::WriteAllText($side26, (ConvertTo-Json -InputObject $wrapped26 -Depth 6))
+            & $installPs1 @opts26 | Out-Null
+            $flat26 = Get-Content -LiteralPath $side26 -Raw | ConvertFrom-Json
+            Assert-True ($flat26.Count -eq 2 -and $flat26[0].name -eq $large26) "Case 26: Existing PowerShell-wrapped records were not repaired"
+            & $installPs1 @opts26 -SingleSize | Out-Null
+            Assert-True (-not (Test-Path $side26)) "Case 26: Empty backup left after both sizes were pruned"
+            Assert-True ((Get-Item $s26).GetValue($xl26) -eq $user26) "Case 26: User's original Extra-Large backup lost"
+            & $installPs1 @opts26 | Out-Null
+        }
+    }
+    & $installPs1 @opts26 -SingleSize -Size Large | Out-Null
+    $json26 = Get-Content -LiteralPath $side26 -Raw
+    $last26 = $json26 | ConvertFrom-Json
+    Assert-True ($json26.TrimStart().StartsWith('[') -and @($last26).Count -eq 1 -and $last26[0].name -eq $large26) "Case 26: One remaining record must be a flat JSON array"
+    & $uninstallPs1 -InstallDir $d26 -RegistryRoot $r26 -SkipCursorRefresh | Out-Null
+    Assert-True ((Get-Item $s26).GetValue($xl26) -eq $user26 -and (Get-Item $s26).GetValueKind($xl26) -eq 'ExpandString') "Case 26: User's saved scheme or type lost on uninstall"
+    Write-Host "PASS Case 26: Size cycling registers the correct scheme after repair, prune and expansion"
+
+    # Case 27: only the runtime backup knows the user's original Large scheme.
+    $d27 = Join-Path $testRoot 'case27_sidecar'
+    $r27 = Join-Path $regRoot 'case27'
+    $c27 = Join-Path $r27 'Control Panel\Cursors'
+    $s27 = Join-Path $c27 'Schemes'
+    [void](New-Item -Path $s27 -Force)
+    $large27 = 'Bibata-Modern-Ice (Large)'
+    $user27 = Join-Path $testRoot 'case27-user.cur'
+    [IO.File]::WriteAllText($user27, 'original cursor')
+    Set-ItemProperty -Path $s27 -Name $large27 -Value $user27 -Type ExpandString
+    $opts27 = @{ InstallDir=$d27; RegistryRoot=$r27; NoLaunch=$true; SkipCursorRefresh=$true; SkipTaskScheduler=$true; TestCursorZipPath=$fixtureZip }
+    & $installPs1 @opts27 | Out-Null
+    $exe27 = Join-Path $d27 'Bibata-Ice-Trail\BibataIceTrail.exe'
+    $cycle27 = Start-Process $exe27 -ArgumentList @('--cycle-cursor-size','--cursors-reg-key',('"{0}"' -f $c27.Substring(6)),'--no-refresh') -WindowStyle Hidden -Wait -PassThru
+    $side27 = Join-Path $d27 'bibata-runtime-schemes.json'
+    $manifest27 = Join-Path $d27 'bibata-ice-glow-manifest.json'
+    $record27 = Get-Content -LiteralPath $side27 -Raw | ConvertFrom-Json
+    Assert-True ($cycle27.ExitCode -eq 0 -and $record27.name -eq $large27 -and $record27.previousValue -eq $user27) "Case 27: Hotkey did not back up the original scheme"
+    $valid27 = [IO.File]::ReadAllBytes($side27)
+    $saved27 = (Get-Item $s27).GetValue($large27)
+    $arrow27 = (Get-Item $c27).GetValue('Arrow')
+    $run27 = Join-Path $r27 'Software\Microsoft\Windows\CurrentVersion\Run'
+    $startup27 = (Get-Item $run27).GetValue('BibataIceTrail')
+    $files27 = @($manifest27, $exe27, $arrow27, $user27)
+    $hashes27 = @($files27 | ForEach-Object { Get-FileSha256 $_ }) -join ','
+    foreach ($problem in 'truncated', 'missing-original', 'exclusive') {
+        if ($problem -eq 'truncated') { [IO.File]::WriteAllText($side27, '[{"name":') }
+        elseif ($problem -eq 'missing-original') { [IO.File]::WriteAllText($side27, '[{"name":"Large","existedBefore":true,"writtenValue":"x"}]') }
+        else { [IO.File]::WriteAllBytes($side27, $valid27) }
+        $sideHash27 = Get-FileSha256 $side27
+        $lock27 = if ($problem -eq 'exclusive') { [IO.File]::Open($side27,'Open','Read','None') }
+        try {
+            foreach ($op in 'install','uninstall') {
+                $message27 = ''
+                try {
+                    if ($op -eq 'install') { & $installPs1 @opts27 -SingleSize -Size Regular | Out-Null }
+                    else { & $uninstallPs1 -InstallDir $d27 -RegistryRoot $r27 -SkipCursorRefresh | Out-Null }
+                }
+                catch { $message27 = $_.Exception.Message }
+                Assert-True ($message27.Contains($side27)) "Case 27 ($problem/$op): Missing sidecar error"
+                Assert-True ((Get-Item $s27).GetValue($large27) -eq $saved27 -and (Get-Item $c27).GetValue('') -eq $large27 -and (Get-Item $c27).GetValue('Arrow') -eq $arrow27) "Case 27: Cursor state changed"
+                Assert-True ((Get-Item $run27).GetValue('BibataIceTrail') -eq $startup27 -and (@($files27 | ForEach-Object { Get-FileSha256 $_ }) -join ',') -eq $hashes27) "Case 27: Startup or files changed"
+            }
+        }
+        finally { if ($lock27) { $lock27.Dispose() } }
+        Assert-True ((Get-FileSha256 $side27) -eq $sideHash27) "Case 27: Sidecar was modified"
+    }
+    $args27 = @('-NoProfile','-ExecutionPolicy','Bypass','-File',('"{0}"' -f $uninstallPs1),'-InstallDir',('"{0}"' -f $d27),'-RegistryRoot',$r27,'-SkipCursorRefresh')
+    $out27 = Join-Path $testRoot 'case27-out.txt'
+    $err27 = Join-Path $testRoot 'case27-err.txt'
+    $lock27 = [IO.File]::Open($side27,'Open','Read','Read')
+    try {
+        $first27 = Start-Process powershell.exe -ArgumentList $args27 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out27 -RedirectStandardError $err27
+    }
+    finally { $lock27.Dispose() }
+    Assert-True ($first27.ExitCode -ne 0 -and -not ([IO.File]::ReadAllText($out27).Contains('Uninstall complete.'))) "Case 27: Locked sidecar reported success"
+    Assert-True (([IO.File]::ReadAllText($err27) -replace '\s','').Contains('bibata-runtime-schemes.json')) "Case 27: Failure did not identify the sidecar"
+    Assert-True ((Test-Path -LiteralPath $manifest27) -and (Get-FileSha256 $side27) -eq $sideHash27) "Case 27: Retry files lost"
+    $retry27 = Start-Process powershell.exe -ArgumentList $args27 -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $out27 -RedirectStandardError $err27
+    Assert-True ($retry27.ExitCode -eq 0 -and -not (Test-Path -LiteralPath $d27)) "Case 27: Retry did not clean the installation"
+    Assert-True ((Get-Item $s27).GetValue($large27) -eq $user27 -and (Get-Item $s27).GetValueKind($large27) -eq 'ExpandString') "Case 27: Original same-name scheme lost"
+    Write-Host "PASS Case 27: Invalid or unreadable sidecar stops changes; a deletion lock reports failure and retry preserves the original scheme"
 
     # =========================================================================
     # Isolation check: real installation, cursor registry, and Run entry untouched
