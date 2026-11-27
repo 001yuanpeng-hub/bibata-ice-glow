@@ -876,10 +876,12 @@ try {
                     }
                 }
 
-                $stageBaseLen = $cursorStageExtract.TrimEnd('\').Length + 1
-                $stagedDirs = @(Get-ChildItem -LiteralPath $cursorStageExtract -Directory -Recurse | Sort-Object { $_.FullName.Length })
+                $stageBasePath = (Resolve-BibataAbsolutePath $cursorStageExtract).TrimEnd('\')
+                $stageBaseLen = $stageBasePath.Length + 1
+                $stagedDirs = @(Get-ChildItem -LiteralPath $stageBasePath -Directory -Recurse | Sort-Object { $_.FullName.Length })
                 foreach ($sd in $stagedDirs) {
-                    $rel = $sd.FullName.Substring($stageBaseLen)
+                    $sdFull = Resolve-BibataAbsolutePath $sd.FullName
+                    $rel = $sdFull.Substring($stageBaseLen)
                     $dstSub = Join-Path $themeRoot $rel
                     if (-not (Test-Path -LiteralPath $dstSub)) {
                         New-Item -ItemType Directory -Path $dstSub -Force | Out-Null
@@ -888,9 +890,10 @@ try {
                     }
                 }
 
-                $stagedFiles = @(Get-ChildItem -LiteralPath $cursorStageExtract -File -Recurse)
+                $stagedFiles = @(Get-ChildItem -LiteralPath $stageBasePath -File -Recurse)
                 foreach ($sf in $stagedFiles) {
-                    $rel = $sf.FullName.Substring($stageBaseLen)
+                    $sfFull = Resolve-BibataAbsolutePath $sf.FullName
+                    $rel = $sfFull.Substring($stageBaseLen)
                     $dstFile = Join-Path $themeRoot $rel
                     $dstNorm = Normalize-BibataPath $dstFile
                     if ((Test-Path -LiteralPath $dstFile) -and (-not $prevManagedFileSet.Contains($dstNorm))) {

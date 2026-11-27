@@ -6,9 +6,11 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $installPs1 = Join-Path $repoRoot "install.ps1"
 $uninstallPs1 = Join-Path $repoRoot "uninstall.ps1"
+. (Join-Path $repoRoot "src\InstallCommon.ps1")
 
 $guid = [Guid]::NewGuid().ToString("N").Substring(0, 10)
-$testRoot = Join-Path $env:TEMP ("bibata_regtest_" + $guid)
+$canonicalTemp = Resolve-BibataAbsolutePath $env:TEMP
+$testRoot = Join-Path $canonicalTemp ("bibata_regtest_" + $guid)
 $regRoot = "HKCU:\Software\BibataIceGlowRegTest_$guid"
 New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 New-Item -Path $regRoot -Force | Out-Null
@@ -404,7 +406,8 @@ class FailLaunch {
     Set-ItemProperty -Path $c9 -Name "Arrow" -Value "%SystemRoot%\cursors\aero_arrow.cur" -Type ExpandString
 
     $effba4dInstall = Join-Path $testRoot "effba4d_install.ps1"
-    $gitExe = "D:\Project\Tools\Git\cmd\git.exe"
+    $gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+    $gitExe = if ($gitCmd) { $gitCmd.Source } else { "D:\Project\Tools\Git\cmd\git.exe" }
     $generatedGenuineV1 = $false
     if (Test-Path $gitExe) {
         $v1ScriptBytes = & $gitExe -C $repoRoot show "effba4d:install.ps1" 2>$null
@@ -1272,7 +1275,7 @@ class FailLaunch {
     $xlHash22 = Get-FileSha256 $xlHelp22
     $mixed22 = "$largeArrow22,$xlHelp22"
     Set-ItemProperty -Path $s22 -Name "My mixed sizes" -Value $mixed22 -Type String
-    $expanded22 = $largeArrow22.Replace($env:TEMP, "%TEMP%")
+    $expanded22 = $largeArrow22.Replace($canonicalTemp, "%TEMP%")
     Set-ItemProperty -Path $s22 -Name "My other arrow" -Value $expanded22 -Type ExpandString
 
     & $installPs1 @install22 -Size Regular -SingleSize | Out-Null

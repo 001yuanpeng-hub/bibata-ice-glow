@@ -1,8 +1,55 @@
-﻿function Normalize-BibataPath([string]$p) {
+﻿function Expand-BibataLongPath([string]$fullPath) {
+    if ([string]::IsNullOrWhiteSpace($fullPath) -or ($fullPath -notlike "*~*")) {
+        return $fullPath
+    }
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class BibataPathNative {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetLongPathNameW(string lpszShortPath, StringBuilder lpszLongPath, uint cchBuffer);
+}
+"@ -ErrorAction SilentlyContinue | Out-Null
+
+        $probe = $fullPath.TrimEnd('\')
+        $suffixParts = New-Object System.Collections.Generic.List[string]
+        while (-not [string]::IsNullOrEmpty($probe) -and -not (Test-Path -LiteralPath $probe)) {
+            $leaf = Split-Path -Leaf $probe
+            $parent = Split-Path -Parent $probe
+            if ([string]::IsNullOrEmpty($parent) -or $parent -eq $probe) { break }
+            $suffixParts.Add($leaf)
+            $probe = $parent
+        }
+        if (-not [string]::IsNullOrEmpty($probe) -and (Test-Path -LiteralPath $probe)) {
+            $sb = New-Object System.Text.StringBuilder 1024
+            $len = [BibataPathNative]::GetLongPathNameW($probe, $sb, [uint32]$sb.Capacity)
+            if ($len -gt $sb.Capacity) {
+                $sb = New-Object System.Text.StringBuilder ([int]$len + 1)
+                $len = [BibataPathNative]::GetLongPathNameW($probe, $sb, [uint32]$sb.Capacity)
+            }
+            if ($len -gt 0) {
+                $longBase = $sb.ToString()
+                for ($i = $suffixParts.Count - 1; $i -ge 0; $i--) {
+                    $longBase = Join-Path $longBase $suffixParts[$i]
+                }
+                return $longBase
+            }
+        }
+    }
+    catch {
+    }
+    return $fullPath
+}
+
+function Normalize-BibataPath([string]$p) {
     if ([string]::IsNullOrWhiteSpace($p)) { return "" }
     $clean = $p.Trim().Trim('"')
     try {
-        return [System.IO.Path]::GetFullPath($clean).TrimEnd('\').ToLowerInvariant()
+        $full = [System.IO.Path]::GetFullPath($clean)
+        $full = Expand-BibataLongPath $full
+        return $full.TrimEnd('\').ToLowerInvariant()
     }
     catch {
         return $clean.TrimEnd('\').ToLowerInvariant()
@@ -14,6 +61,7 @@ function Resolve-BibataAbsolutePath([string]$rawPath) {
     $trimmed = $rawPath.Trim().Trim('"')
     $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($trimmed)
     $full = [System.IO.Path]::GetFullPath($resolved)
+    $full = Expand-BibataLongPath $full
     if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }
     return $full
 }
